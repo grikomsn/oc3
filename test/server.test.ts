@@ -227,6 +227,38 @@ describe("native OpenAI bridge", () => {
     }
   });
 
+  test("unknown models fall back to the native OpenAI backend with client auth", async () => {
+    delete process.env.OPENAI_API_KEY;
+    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify([]));
+    process.env.OC3_OPENAI_FALLBACK_URL = `http://127.0.0.1:${UPSTREAM_PORT}/v1`;
+    try {
+      const handle = await startServer({ port: PROXY_PORT + 7, auth });
+      const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-user-key" },
+        body: JSON.stringify({ model: "o4-mini-not-in-catalog", stream: true, store: false, input: "hi" }),
+      });
+      expect(response.status).toBe(200);
+      expect(responsesRequests.at(-1)!.url).toBe(`http://127.0.0.1:${UPSTREAM_PORT}/v1/responses`);
+      expect(responsesRequests.at(-1)!.headers.authorization).toBe("Bearer sk-user-key");
+      handle.stop();
+    } finally {
+      delete process.env.OC3_OPENAI_FALLBACK_URL;
+    }
+  });
+
+  test("native fallback 404s when no credentials are available", async () => {
+    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify([]));
+    const handle = await startServer({ port: PROXY_PORT + 8, auth });
+    const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "totally-unknown", stream: true, input: "hi" }),
+    });
+    expect(response.status).toBe(404);
+    handle.stop();
+  });
+
   test("openai/ models are unavailable without OPENAI_API_KEY", async () => {
     delete process.env.OPENAI_API_KEY;
     writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify([]));

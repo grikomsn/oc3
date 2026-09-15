@@ -519,13 +519,27 @@ function synthesizeResponsesStream(turn: { output: Array<Record<string, unknown>
 const NATIVE_CHATGPT_BASE = "https://chatgpt.com/backend-api/codex";
 const NATIVE_OPENAI_BASE = "https://api.openai.com/v1";
 
+function nativeChatGptBase(): string {
+  return process.env.OC3_CHATGPT_FALLBACK_URL ?? NATIVE_CHATGPT_BASE;
+}
+
+function nativeOpenAiBase(): string {
+  return process.env.OC3_OPENAI_FALLBACK_URL ?? NATIVE_OPENAI_BASE;
+}
+
 // Unknown model: forward the Responses request to the native backends with the
 // client's own auth headers (chatgpt-account-id => ChatGPT backend; otherwise
 // OPENAI_API_KEY => api.openai.com). Mirrors ollama's route decision.
 async function passthroughNative(request: Request, body: Record<string, unknown>): Promise<Response> {
-  const chatGptAuth = request.headers.get("chatgpt-account-id") ?? (request.headers.get("authorization")?.includes("eyJ") ? request.headers.get("authorization") : undefined);
-  const apiKey = request.headers.get("x-openai-api-key") ?? process.env.OPENAI_API_KEY;
-  const target = chatGptAuth ? NATIVE_CHATGPT_BASE : apiKey ? NATIVE_OPENAI_BASE : undefined;
+  // Header contract mirrors ollama codex_desktop.go: ChatGPT-Account-ID marks a
+  // ChatGPT-account session (forward client auth to the Codex backend); a Bearer
+  // key that is not oc3's own marks an OpenAI API-key session.
+  const chatGptAuth = request.headers.get("chatgpt-account-id");
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer /i, "");
+  const apiKey = (bearer && bearer !== "oc3" ? bearer : undefined)
+    ?? request.headers.get("x-openai-api-key")
+    ?? process.env.OPENAI_API_KEY;
+  const target = chatGptAuth ? nativeChatGptBase() : apiKey ? nativeOpenAiBase() : undefined;
   if (!target) {
     return json({ error: { message: `Unknown model ${JSON.stringify(String(body.model))} and no native backend credentials available. Run \`oc3 models --refresh\`.` } }, 404);
   }
