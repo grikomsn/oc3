@@ -7,6 +7,22 @@ import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError
 import { SseParser } from "./sse-parser";
 import { applyReasoningWire, normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, TurnModelCache } from "./desktop-normalize";
 import { thinkingMetadataFor } from "./routing-catalog";
+import { executeWebSearch, searchBridgeNeeded, stripHostedSearchTool } from "./web-search";
+import { truncatedStopReason } from "./stop-reason";
+
+function recordField(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function zeroUsage(): Record<string, unknown> {
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens_details: { reasoning_tokens: 0 },
+  };
+}
 import { anthropicRequestFromResponses, AnthropicStreamToResponses } from "./anthropic-bridge";
 import { googleRequestFromResponses, GoogleStreamToResponses } from "./google-bridge";
 
@@ -174,6 +190,9 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   }
 
   body = applyReasoningWire(body, model);
+  if (searchBridgeNeeded(body, model)) {
+    return await runSearchBridgeLoop(request, body, model, auth, sessionId);
+  }
   const chatRequest = responsesRequestToChat(body, model);
   const chatUrl = endpointUrl(model.baseUrl, "chat-completions", model.rawModelId);
   let attempt = 0;
@@ -327,6 +346,168 @@ async function handleBridgedEndpoint(
     status: 200,
     headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
   });
+}
+
+const MAX_SEARCH_TURNS = 4;
+
+// Chat-completions models cannot execute Codex's hosted web_search tool.
+// Run an oc3-side loop: execute the search via Exa/Parallel MCP (mirroring
+// opencode's client), append results to input, and re-run until the model
+// answers without another search (bounded).
+async function runSearchBridgeLoop(
+  request: Request,
+  initialBody: Record<string, unknown>,
+  model: Oc3Model,
+  auth: OpenCodeAuth,
+  sessionId: string,
+): Promise<Response> {
+  let body = stripHostedSearchTool(initialBody).body;
+  let lastTurn: { output: Array<Record<string, unknown>>; finishReason: string | undefined; usage: Record<string, unknown> | undefined } | undefined;
+  for (let turn = 0; turn < 4; turn += 1) {
+    const turnResult = await runOneChatTurn(body, model, auth, sessionId);
+    if (typeof turnResult === "number") return json({ error: { message: `Upstream error ${turnResult}` } }, turnResult);
+    lastTurn = turnResult;
+    const searchCall = turnResult.output.find((item) => item.type === "function_call" && item.name === "web_search");
+    if (!searchCall) break;
+    let query = "";
+    try {
+      const parsed = JSON.parse(String(searchCall.arguments ?? "{}")) as Record<string, unknown>;
+      query = typeof parsed.query === "string" ? parsed.query : "";
+    } catch { /* malformed args: report empty-result tool output below */ }
+    const output = query ? await executeWebSearch(query, sessionId) : "web_search failed: missing query argument";
+    body = {
+      ...body,
+      input: [
+        ...(Array.isArray(body.input) ? body.input : []),
+        searchCall,
+        { type: "function_call_output", call_id: searchCall.call_id, output },
+      ],
+    };
+  }
+  if (!lastTurn) return json({ error: { message: "Search loop produced no response" } }, 502);
+  return synthesizeResponsesStream(lastTurn);
+}
+
+async function runOneChatTurn(
+  body: Record<string, unknown>,
+  model: Oc3Model,
+  auth: OpenCodeAuth,
+  sessionId: string,
+): Promise<{ output: Array<Record<string, unknown>>; finishReason: string | undefined; usage: Record<string, unknown> | undefined } | number> {
+  const credential = process.env.OC3_TEST_TOKEN
+    ? { token: process.env.OC3_TEST_TOKEN, server: "", orgId: undefined, orgName: undefined }
+    : await auth.getCredential();
+  if (!credential.token) return 401;
+  const requestId = newId("req");
+  const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
+  if (credential.orgId) headers["x-org-id"] = credential.orgId;
+  const chatRequest = responsesRequestToChat(body, model);
+  let attempt = 0;
+  let currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
+  while (true) {
+    let upstream: Response;
+    try {
+      upstream = await fetch(endpointUrl(model.baseUrl, "chat-completions", model.rawModelId), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(currentBody),
+        signal: AbortSignal.timeout(600_000),
+      });
+    } catch (error) {
+      if (attempt < 2 && isTransientNetworkError(error)) {
+        await Bun.sleep(retryDelayMs(attempt++));
+        continue;
+      }
+      return 502;
+    }
+    if (!upstream.ok || !upstream.body) {
+      const detail = !upstream.ok ? await upstream.text().catch(() => "") : "";
+      if (attempt < 2 && isTransientServerError(upstream.status, detail)) {
+        await Bun.sleep(retryDelayMs(attempt++));
+        continue;
+      }
+      return upstream.status;
+    }
+    const responseId = newId("resp");
+    const converter = new ChatStreamToResponses(responseId, toolSchemas(body));
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = new SseParser();
+    let finishReason: string | undefined;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const block of parser.push(decoder.decode(value, { stream: true }))) {
+          const data = parseSseData(`data: ${block.data}`);
+          if (!data) continue;
+          if (data.finish_reason !== undefined || (Array.isArray(data.choices) && recordField((data.choices as unknown[])[0])?.finish_reason !== undefined)) {
+            const choice = recordField((data.choices as unknown[])[0]);
+            if (choice && typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+          }
+          converter.ingest(data);
+        }
+      }
+      for (const block of parser.finish()) {
+        const data = parseSseData(`data: ${block.data}`);
+        if (data) converter.ingest(data);
+      }
+      const events = converter.finalize(finishReason);
+      const completed = events.find((event) => event.event === "response.completed" || event.event === "response.incomplete");
+      const response = completed?.data.response as Record<string, unknown> | undefined;
+      const output = Array.isArray(response?.output) ? response?.output as Array<Record<string, unknown>> : [];
+      return { output, finishReason, usage: response?.usage as Record<string, unknown> | undefined };
+    } catch {
+      return 502;
+    }
+  }
+}
+
+function synthesizeResponsesStream(turn: { output: Array<Record<string, unknown>>; finishReason: string | undefined; usage: Record<string, unknown> | undefined }): Response {
+  const responseId = newId("resp");
+  const encoder = new TextEncoder();
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  void (async () => {
+    const send = async (event: { event: string; data: Record<string, unknown> }) => {
+      await writer.write(formatSseEvent(event));
+    };
+    try {
+      await send({ event: "response.created", data: { type: "response.created", response: { id: responseId } } });
+      for (const item of turn.output) {
+        if (item.type === "message") {
+          const content = Array.isArray(item.content) ? item.content : [];
+          const text = content.map((part) => typeof (part as Record<string, unknown>).text === "string" ? (part as Record<string, unknown>).text as string : "").join("");
+          await send({ event: "response.output_item.added", data: { type: "response.output_item.added", output_index: 0, item: { type: "message", id: item.id, role: "assistant", content: [] } } });
+          if (text) await send({ event: "response.output_text.delta", data: { type: "response.output_text.delta", item_id: item.id, output_index: 0, content_index: 0, delta: text } });
+          await send({ event: "response.output_item.done", data: { type: "response.output_item.done", output_index: 0, item } });
+        } else if (item.type === "function_call") {
+          const index = turn.output.indexOf(item);
+          await send({ event: "response.output_item.added", data: { type: "response.output_item.added", output_index: index, item: { ...item, arguments: "" } } });
+          const args = typeof item.arguments === "string" ? item.arguments : "{}";
+          await send({ event: "response.function_call_arguments.delta", data: { type: "response.function_call_arguments.delta", item_id: item.id, output_index: index, delta: args } });
+          await send({ event: "response.function_call_arguments.done", data: { type: "response.function_call_arguments.done", item_id: item.id, output_index: index, arguments: args } });
+          await send({ event: "response.output_item.done", data: { type: "response.output_item.done", output_index: index, item } });
+        }
+      }
+      const truncated = truncatedStopReason(turn.finishReason);
+      if (truncated) {
+        await send({
+          event: "response.incomplete",
+          data: { type: "response.incomplete", response: { id: responseId, output: turn.output, usage: turn.usage ?? zeroUsage(), incomplete_details: { reason: truncated === "max_output_tokens" ? "max_output_tokens" : "content_filter" } } },
+        });
+      } else {
+        await send({ event: "response.completed", data: { type: "response.completed", response: { id: responseId, output: turn.output, usage: turn.usage ?? zeroUsage() } } });
+      }
+      await writer.write(encoder.encode("data: [DONE]\n\n"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "stream failed";
+      await send({ event: "error", data: { type: "error", message } });
+    } finally {
+      await writer.close();
+    }
+  })();
+  return new Response(readable, { status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" } });
 }
 
 const NATIVE_CHATGPT_BASE = "https://chatgpt.com/backend-api/codex";
