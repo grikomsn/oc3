@@ -1,0 +1,24 @@
+{
+  "name": "@nbrst/oc3",
+  "version": "0.1.0",
+  "description": "OpenCode Console proxy for OpenAI Codex and ChatGPT desktop",
+  "license": "MIT",
+  "repository": "https://github.com/grikomsn/oc3",
+  "homepage": "https://oc3.nbr.st",
+  "bin": {
+    "oc3": "./bin/cli.js"
+  },
+  "files": ["bin/"],
+  "scripts": {
+    "postinstall": "node -e \"try{require.resolve('@nbrst/oc3-'+process.platform+'-'+process.arch)}catch{console.error('oc3: no binary for '+process.platform+'-'+process.arch+'; see https://github.com/grikomsn/oc3/releases')}\""
+  },
+  "optionalDependencies": {
+    "@nbrst/oc3-darwin-arm64": "0.1.0",
+    "@nbrst/oc3-darwin-x64": "0.1.0",
+    "@nbrst/oc3-linux-x64": "0.1.0",
+    "@nbrst/oc3-linux-arm64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

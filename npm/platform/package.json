@@ -1,0 +1,9 @@
+{
+  "name": "TEMPLATE",
+  "version": "0.1.0",
+  "description": "oc3 binary (TEMPLATE platform)",
+  "license": "MIT",
+  "os": ["TEMPLATE_OS"],
+  "cpu": ["TEMPLATE_ARCH"],
+  "files": ["bin/"]
+}

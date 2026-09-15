@@ -1,5 +1,5 @@
 {
-  "name": "oc3",
+  "name": "@nbrst/oc3",
   "version": "0.1.0",
   "description": "Minimal OpenCode Console proxy for Codex and ChatGPT desktop",
   "type": "module",
@@ -23,5 +23,9 @@
     "@opentui/core-linux-x64": "0.1.107",
     "@types/bun": "^1.2.0",
     "typescript": "^5.8.0"
+  },
+  "private": true,
+  "publishConfig": {
+    "access": "public"
   }
 }

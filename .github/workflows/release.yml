@@ -43,3 +43,41 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/checksums.txt
+
+      - name: Prepare npm platform packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p npm-dist
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            os="${target%%-*}"
+            case "$target" in
+              *-x64) arch="x64" ;;
+              *) arch="arm64" ;;
+            esac
+            pkg_dir="npm-dist/@nbrst/oc3-${target}"
+            mkdir -p "$pkg_dir/bin"
+            cp "dist/oc3-${target}" "$pkg_dir/bin/oc3"
+            sed -e "s/TEMPLATE/@nbrst\/oc3-${target}/"                 -e "s/TEMPLATE_OS/${os}/"                 -e "s/TEMPLATE_ARCH/${arch}/"                 -e "s/0.1.0/${VERSION}/"                 npm/platform/package.json > "$pkg_dir/package.json"
+            cp LICENSE "$pkg_dir/LICENSE" 2>/dev/null || true
+          done
+          # wrapper package with versions synced to the tag
+          node -e "
+            const pkg = require('./npm/package.json');
+            pkg.version = process.env.VERSION;
+            for (const dep of Object.keys(pkg.optionalDependencies)) pkg.optionalDependencies[dep] = process.env.VERSION;
+            require('fs').writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
+          " || true
+
+      - name: Publish to npm
+        if: ${{ secrets.NPM_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            cd "npm-dist/@nbrst/oc3-${target}"
+            npm publish --access public
+            cd -
+          done
+          cd npm && npm publish --access public
