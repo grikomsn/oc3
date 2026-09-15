@@ -7,9 +7,6 @@ models (device-code OAuth, no API key) — the same pattern as `codex --oss` wit
 but for Console. It also bridges models that only speak Chat Completions, and can expose
 native OpenAI models when `OPENAI_API_KEY` is set.
 
-oc3 never launches Codex and never writes `~/.codex/config.toml`. The `snippet` command
-prints the profile block to paste yourself.
-
 ## Install
 
 ```bash

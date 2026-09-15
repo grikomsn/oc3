@@ -3,6 +3,9 @@ import { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer } from "./server";
+import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
+import { clearDaemonInfo, daemonRunning, launchChatGptDesktop, readDaemonInfo, removeStaleDaemonFile, stopDaemon, writeDaemonInfo } from "./daemon";
+import { codexCatalogPath } from "./store";
 import { DEFAULT_CONSOLE_SERVER } from "./protocol";
 import { ensureHome, loadSession, loadState, saveState } from "./store";
 import { runTui } from "./tui";
@@ -103,6 +106,53 @@ async function main(): Promise<void> {
       process.on("SIGINT", () => { handle.stop(); process.exit(0); });
       return;
     }
+    case "start": {
+      const p = port(flags);
+      removeStaleDaemonFile();
+      const existing = readDaemonInfo();
+      if (existing && daemonRunning(existing)) {
+        console.log(`oc3 proxy already running on port ${existing.port} (pid ${existing.pid}).`);
+        return;
+      }
+      let models = availableModels();
+      if (!models.length) {
+        console.log("No cached models; refreshing from Console...");
+        models = await refreshModels(auth);
+      }
+      await writeCodexCatalog(models);
+      const overrides = { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${p}/v1` };
+      const result = applyCodexOverrides(overrides);
+      console.log(`Config overrides ${result.changed ? `applied to ${codexConfigPath()}` : "already in place"} (backup: ${result.backupCreated ? "created" : "kept"})`);
+      const handle = await startServer({ port: p, auth });
+      writeDaemonInfo({ pid: process.pid, port: handle.port });
+      console.log(`oc3 proxy listening on http://127.0.0.1:${handle.port}`);
+      if (flags["no-launch"] !== true) {
+        const launched = launchChatGptDesktop();
+        console.log(launched ? "Booted ChatGPT desktop." : "Could not launch ChatGPT desktop (open -a ChatGPT).");
+      }
+      console.log("Run `oc3 stop` to restore the previous endpoint and models.");
+      process.on("SIGINT", () => { handle.stop(); console.log("\nProxy stopped. Overrides remain applied; run `oc3 stop` to restore."); process.exit(0); });
+      return;
+    }
+    case "stop": {
+      removeStaleDaemonFile();
+      const stopped = stopDaemon();
+      const restored = restoreCodexOverrides();
+      if (stopped) console.log("oc3 proxy stopped.");
+      if (restored.changed) console.log(`Config restored from backup (${codexConfigPath()}).`);
+      else if (!restored.hadBackup) console.log("No oc3 overrides found to restore.");
+      if (process.platform === "darwin") console.log("Restart ChatGPT desktop if it still points at the old endpoint.");
+      return;
+    }
+    case "status": {
+      const info = readDaemonInfo();
+      removeStaleDaemonFile();
+      const live = info && daemonRunning(info);
+      const applied = overridesApplied({ model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${port(flags)}/v1` });
+      console.log(`proxy: ${live ? `running on port ${info!.port} (pid ${info!.pid})` : "stopped"}`);
+      console.log(`config overrides: ${applied ? "applied" : "not applied"} (${codexConfigPath()})`);
+      return;
+    }
     case "snippet": {
       const state = loadState<{ defaultModel?: string }>({});
       const selected = typeof flags.model === "string" && flags.model ? flags.model : state.defaultModel ?? "<model-id>";
@@ -158,8 +208,11 @@ Usage:
   oc3 whoami              Show signed-in account and organizations
   oc3 org [--org ID]      List or select the active organization
   oc3 models [--refresh]  List models and regenerate the Codex catalog
-  oc3 serve [--port N]    Run the proxy server (default port 8788)
-  oc3 snippet             Print the Codex config.toml profile to paste manually
+  oc3 start [--port N]    Apply config overrides, start the proxy, boot ChatGPT desktop
+                          (--no-launch skips booting ChatGPT desktop)
+  oc3 stop                Restore previous config values and stop the proxy
+  oc3 status              Show proxy and override state
+  oc3 serve [--port N]    Run the proxy server without touching config.toml
   oc3 catalog             Regenerate codex-models.json from cached models
   oc3 logout              Remove stored Console credentials
 

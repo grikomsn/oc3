@@ -3,6 +3,8 @@ import type { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer, type ServerHandle } from "./server";
+import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
+import { codexCatalogPath } from "./store";
 import { loadState, saveState } from "./store";
 import type { Oc3Model } from "./models";
 
@@ -40,7 +42,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     listLines.push(line);
     listBox.add(line);
   }
-  const footer = new TextRenderable(renderer, { content: "s: toggle server  r: refresh models  q: quit", fg: "#707880" });
+  const footer = new TextRenderable(renderer, { content: "s: toggle server  e: toggle config overrides  r: refresh models  q: quit", fg: "#707880" });
   const status = new TextRenderable(renderer, { content: "", fg: "#9BE494" });
 
   root.add(header);
@@ -73,7 +75,8 @@ export async function runTui(options: TuiOptions): Promise<void> {
   function refreshStatus(): void {
     const session = options.auth.getSession();
     account.content = session ? `account: ${session.email}  org: ${session.orgName ?? session.orgId ?? "none"}` : "not signed in — exit and run: oc3 login";
-    serverStatus.content = handle ? `server: http://127.0.0.1:${handle.port}  requests: ${handle.requestCount()}` : "server: stopped";
+    const applied = overridesApplied({ model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${options.port}/v1` });
+    serverStatus.content = `${handle ? `server: http://127.0.0.1:${handle.port}  requests: ${handle.requestCount()}` : "server: stopped"}  config: ${applied ? "overridden" : "original"}`;
     status.content = statusLine;
   }
 
@@ -114,6 +117,22 @@ export async function runTui(options: TuiOptions): Promise<void> {
     refreshStatus();
   }
 
+  async function toggleOverrides(): Promise<void> {
+    try {
+      const overrides = { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${options.port}/v1` };
+      if (overridesApplied(overrides)) {
+        const restored = restoreCodexOverrides();
+        statusLine = restored.changed ? "Config overrides restored." : "No overrides to restore.";
+      } else {
+        const result = applyCodexOverrides(overrides);
+        statusLine = result.changed ? "Config overrides applied." : "Config overrides already applied.";
+      }
+    } catch (error) {
+      statusLine = `Config toggle failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    refreshStatus();
+  }
+
   renderer.keyInput.on("keypress", (key) => {
     if (key.name === "q" || key.name === "escape") {
       handle?.stop();
@@ -142,6 +161,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       return;
     }
     if (key.name === "s") { void toggleServer(); return; }
+    if (key.name === "e") { void toggleOverrides(); return; }
     if (key.name === "r") { void loadModels(true); return; }
   });
 
