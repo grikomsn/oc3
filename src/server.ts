@@ -5,6 +5,8 @@ import { buildRequestHeaders, endpointUrl, newId, USER_AGENT } from "./protocol"
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
 import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError, retryDelayMs } from "./retry";
 import { SseParser } from "./sse-parser";
+import { applyReasoningWire, normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, TurnModelCache } from "./desktop-normalize";
+import { thinkingMetadataFor } from "./routing-catalog";
 
 export interface ServerHandle {
   port: number;
@@ -16,6 +18,7 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
   const auth = options.auth;
   let requests = 0;
   const sessionId = newId("sess");
+  const turnModels = new TurnModelCache();
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: options.port,
@@ -41,7 +44,7 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
         const responsesMatch = request.method === "POST" && (path === "/responses" || path === "/v1/responses" || path === "/backend-api/codex/responses");
         if (responsesMatch) {
           requests += 1;
-          return await handleResponses(request, auth, sessionId);
+          return await handleResponses(request, auth, sessionId, turnModels);
         }
         return json({ error: { message: `Not found: ${request.method} ${path}` } }, 404);
       } catch (error) {
@@ -77,7 +80,7 @@ async function parseRequestBody(request: Request): Promise<Record<string, unknow
   return JSON.parse(new TextDecoder().decode(decoded)) as Record<string, unknown>;
 }
 
-async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: string): Promise<Response> {
+async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: string, turnModels: TurnModelCache): Promise<Response> {
   let body: Record<string, unknown>;
   try {
     body = await parseRequestBody(request);
@@ -87,8 +90,21 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   }
   const requestedModel = typeof body.model === "string" ? body.model : "";
   const models = availableModels();
-  const model = findModel(models, requestedModel);
+  let model = findModel(models, requestedModel);
   if (!model) {
+    const autoReview = resolveAutoReview(requestedModel, body, turnModels, pickDefaultModel(models));
+    if (autoReview) {
+      body = autoReview.body;
+      model = findModel(models, autoReview.model);
+    }
+  }
+  if (!model) {
+    // Unknown model: fall through to the native backends with the client's own
+    // auth headers (ollama codex_desktop.go parity) so real OpenAI/ChatGPT
+    // models keep working through oc3.
+    if (requestedModel) {
+      return await passthroughNative(request, body);
+    }
     return json({
       error: {
         message: `Unknown model ${JSON.stringify(requestedModel)}. Run \`oc3 models\` to refresh the catalog.`,
@@ -113,6 +129,14 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
     return json({ error: { message: "No credentials for this model provider" } }, 401);
   }
 
+  const desktopNormalized = normalizeInputItems(body);
+  body = desktopNormalized.body;
+  const sandboxMode = typeof body.sandbox_mode === "string" ? body.sandbox_mode : undefined;
+  const execNormalized = normalizeFullAccessExecTool(body, sandboxMode);
+  body = execNormalized.body;
+  const thinking = thinkingMetadataFor(model);
+  body = normalizeReasoningForModel(body, model, thinking);
+
   const requestId = newId("req");
   const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
@@ -127,6 +151,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
           method: "POST",
           headers,
           body: upstreamBody,
+          signal: AbortSignal.timeout(600_000),
         });
       } catch (error) {
         if (responsesAttempt < 2 && isTransientNetworkError(error)) {
@@ -148,6 +173,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
     });
   }
 
+  body = applyReasoningWire(body, model);
   const chatRequest = responsesRequestToChat(body, model);
   const chatUrl = endpointUrl(model.baseUrl, "chat-completions", model.rawModelId);
   let attempt = 0;
@@ -155,7 +181,12 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   while (true) {
     let upstream: Response;
     try {
-      upstream = await fetch(chatUrl, { method: "POST", headers, body: JSON.stringify(currentBody) });
+      upstream = await fetch(chatUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(currentBody),
+        signal: AbortSignal.timeout(600_000),
+      });
     } catch (error) {
       if (attempt < 2 && isTransientNetworkError(error)) {
         await Bun.sleep(retryDelayMs(attempt++));
@@ -165,6 +196,11 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
     }
     if (!upstream.ok) {
       const detail = await upstream.text().catch(() => "");
+      if (attempt < 4 && upstream.status === 429) {
+        const retryAfter = Number(upstream.headers.get("retry-after"));
+        await Bun.sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 10_000) : retryDelayMs(attempt++));
+        continue;
+      }
       if (attempt < 2 && isTransientServerError(upstream.status, detail)) {
         await Bun.sleep(retryDelayMs(attempt++));
         continue;
@@ -187,6 +223,43 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
 async function passthroughError(upstream: Response): Promise<Response> {
   const text = await upstream.text().catch(() => "");
   return json({ error: { message: `Upstream error ${upstream.status}: ${text.slice(0, 2000)}` } }, upstream.status);
+}
+
+const NATIVE_CHATGPT_BASE = "https://chatgpt.com/backend-api/codex";
+const NATIVE_OPENAI_BASE = "https://api.openai.com/v1";
+
+// Unknown model: forward the Responses request to the native backends with the
+// client's own auth headers (chatgpt-account-id => ChatGPT backend; otherwise
+// OPENAI_API_KEY => api.openai.com). Mirrors ollama's route decision.
+async function passthroughNative(request: Request, body: Record<string, unknown>): Promise<Response> {
+  const chatGptAuth = request.headers.get("chatgpt-account-id") ?? (request.headers.get("authorization")?.includes("eyJ") ? request.headers.get("authorization") : undefined);
+  const apiKey = request.headers.get("x-openai-api-key") ?? process.env.OPENAI_API_KEY;
+  const target = chatGptAuth ? NATIVE_CHATGPT_BASE : apiKey ? NATIVE_OPENAI_BASE : undefined;
+  if (!target) {
+    return json({ error: { message: `Unknown model ${JSON.stringify(String(body.model))} and no native backend credentials available. Run \`oc3 models --refresh\`.` } }, 404);
+  }
+  const forwardHeaders: Record<string, string> = { "Content-Type": "application/json", Accept: "text/event-stream" };
+  if (chatGptAuth) {
+    const clientAuth = request.headers.get("authorization");
+    if (clientAuth) forwardHeaders["authorization"] = clientAuth;
+    forwardHeaders["chatgpt-account-id"] = chatGptAuth;
+  } else {
+    forwardHeaders["authorization"] = `Bearer ${apiKey}`;
+  }
+  const upstream = await fetch(`${target}/responses`, {
+    method: "POST",
+    headers: forwardHeaders,
+    body: JSON.stringify(body),
+  });
+  if (!upstream.ok) return passthroughError(upstream);
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
+  });
+}
+
+function pickDefaultModel(models: readonly Oc3Model[]): string | undefined {
+  return models[0]?.id;
 }
 
 function toolSchemas(body: Record<string, unknown>): ReadonlyMap<string, Record<string, unknown>> {

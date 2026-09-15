@@ -1,5 +1,6 @@
 import { ensureHome, codexCatalogPath } from "./store";
 import { writeFileSync } from "node:fs";
+import { writeRoutingCatalog } from "./routing-catalog";
 import type { Oc3Model } from "./models";
 
 const DEFAULT_REASONING_LEVELS = [
@@ -69,4 +70,5 @@ export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<vo
   };
   ensureHome();
   writeFileSync(codexCatalogPath(), `${JSON.stringify(catalog, null, 2)}\n`);
+  writeRoutingCatalog(models);
 }
