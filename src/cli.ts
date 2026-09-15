@@ -57,9 +57,19 @@ async function main(): Promise<void> {
         process.stdout.write(`\rWaiting for authorization... ${seconds}s   `);
       });
       process.stdout.write("\n");
-      if (typeof flags.org === "string" && flags.org) await auth.selectOrganization(flags.org);
+      if (typeof flags.org === "string" && flags.org) {
+        await auth.selectOrganization(flags.org);
+      } else if (session.orgs.length > 1 && process.stdin.isTTY) {
+        console.log(`Signed in as ${session.email}. Pick an organization:`);
+        session.orgs.forEach((org, index) => console.log(`  ${index + 1}. ${org.name} (${org.id})`));
+        const selected = await promptOrgChoice(session.orgs.length);
+        if (selected !== undefined) await auth.selectOrganization(session.orgs[selected]!.id);
+      }
       const final = loadSessionSafe() ?? session;
       console.log(`Signed in as ${final.email} (org: ${final.orgName ?? final.orgId ?? "none"})`);
+      if (final.orgs.length > 1 && !process.stdin.isTTY && !flags.org) {
+        console.log(`Multiple orgs available; switch with: oc3 org --org <id>`);
+      }
       return;
     }
     case "logout": {
@@ -193,6 +203,27 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     }
   }
+}
+
+async function promptOrgChoice(count: number): Promise<number | undefined> {
+  process.stdout.write("Org number [1]: ");
+  const answer = await new Promise<string>((resolve) => {
+    const chunks: Buffer[] = [];
+    const onData = (chunk: Buffer) => chunks.push(chunk);
+    process.stdin.once("data", onData);
+    process.stdin.once("end", () => {
+      process.stdin.removeListener("data", onData);
+      resolve("");
+    });
+    setTimeout(() => {
+      process.stdin.removeListener("data", onData);
+      resolve("");
+    }, 30_000);
+  });
+  const value = answer.trim();
+  if (!value) return 0;
+  const index = Number.parseInt(value, 10) - 1;
+  return index >= 0 && index < count ? index : undefined;
 }
 
 function loadSessionSafe() {

@@ -34,7 +34,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   const header = new TextRenderable(renderer, { content: "oc3 — OpenCode Console proxy", fg: "#8AB4FF" });
   const account = new TextRenderable(renderer, { content: "", fg: "#9BE49B" });
   const serverStatus = new TextRenderable(renderer, { content: "", fg: "#F0C674" });
-  const listTitle = new TextRenderable(renderer, { content: "Models (up/down select, Enter to set default, r refresh):", fg: "#C5C8D6" });
+  const listTitle = new TextRenderable(renderer, { content: "Models:", fg: "#C5C8D6" });
   const listBox = new BoxRenderable(renderer, { flexDirection: "column", height: 14, backgroundColor: "#101014" });
   const listLines: TextRenderable[] = [];
   for (let index = 0; index < 24; index += 1) {
@@ -54,22 +54,29 @@ export async function runTui(options: TuiOptions): Promise<void> {
   root.add(footer);
 
   function renderList(): void {
-    const visible = models.slice(0, listLines.length);
+    const viewportHeight = 10;
+    const total = models.length;
+    let start = 0;
+    if (total > viewportHeight) {
+      start = Math.max(0, Math.min(selected - Math.floor(viewportHeight / 2), total - viewportHeight));
+    }
+    const visible = models.slice(start, start + viewportHeight);
     listLines.forEach((line, index) => {
       const model = visible[index];
       if (!model) {
         line.content = "";
         return;
       }
-      const marker = model.id === state.defaultModel ? "*" : index === selected ? ">" : " ";
+      const marker = model.id === state.defaultModel ? "*" : index + start === selected ? ">" : " ";
       line.content = `${marker} ${model.id.padEnd(44)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}`;
-      line.fg = index === selected ? "#FFFFFF" : model.id === state.defaultModel ? "#9BE494" : "#888899";
-      line.bg = index === selected ? "#22304a" : undefined;
+      line.fg = index + start === selected ? "#FFFFFF" : model.id === state.defaultModel ? "#9BE494" : "#888899";
+      line.bg = index + start === selected ? "#22304a" : undefined;
     });
-    if (!models.length) {
+    if (!total) {
       listLines[0]!.content = "  (no models cached — press r to refresh)";
       listLines[0]!.fg = "#888888";
     }
+    listTitle.content = `Models ${total ? `${selected + 1}/${total}` : "(0)"} — up/down move, Enter sets default, r refreshes:`;
   }
 
   function refreshStatus(): void {
@@ -92,6 +99,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       await writeCodexCatalog(models);
       const index = models.findIndex((model) => model.id === state.defaultModel);
       selected = index >= 0 ? index : 0;
+      if (selected >= models.length) selected = Math.max(0, models.length - 1);
       statusLine = refresh ? `Loaded ${models.length} models; codex catalog written.` : `Loaded ${models.length} cached models.`;
     } catch (error) {
       models = availableModels();
@@ -139,16 +147,18 @@ export async function runTui(options: TuiOptions): Promise<void> {
       renderer.destroy();
       return;
     }
-    if (key.name === "down" || key.name === "j") {
+    if (key.name === "down" || key.name === "j" || key.sequence === "\u001b[B") {
       selected = Math.min(selected + 1, Math.max(models.length - 1, 0));
       renderList();
       return;
     }
-    if (key.name === "up" || key.name === "k") {
+    if (key.name === "up" || key.name === "k" || key.sequence === "\u001b[A") {
       selected = Math.max(selected - 1, 0);
       renderList();
       return;
     }
+    if (key.name === "g") { selected = 0; renderList(); return; }
+    if (key.name === "G") { selected = Math.max(models.length - 1, 0); renderList(); return; }
     if (key.name === "return" || key.name === "enter") {
       const model = models[selected];
       if (model) {

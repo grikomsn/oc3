@@ -225,3 +225,28 @@ describe("native OpenAI bridge", () => {
     handle.stop();
   });
 });
+
+describe("transport fallbacks", () => {
+  test("websocket upgrade attempts get 426 so Codex falls back to HTTP", async () => {
+    const handle = await startServer({ port: PROXY_PORT + 5, auth });
+    const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
+      headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" },
+    });
+    expect(response.status).toBe(426);
+    handle.stop();
+  });
+
+  test("accepts zstd-compressed request bodies", async () => {
+    await writeCatalog();
+    const handle = await startServer({ port: PROXY_PORT + 6, auth });
+    const payload = JSON.stringify({ model: "acme/gpt-model", stream: true, store: false, input: "hi" });
+    const compressed = Bun.zstdCompressSync(Buffer.from(payload));
+    const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Encoding": "zstd" },
+      body: new Uint8Array(compressed),
+    });
+    expect(response.status).toBe(200);
+    handle.stop();
+  });
+});

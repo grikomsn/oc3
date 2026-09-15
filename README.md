@@ -17,7 +17,8 @@ bun link  # optional: exposes `oc3` on PATH
 ## Usage
 
 ```bash
-oc3 login              # device-code sign in to OpenCode Console (opens browser)
+oc3 login              # device-code sign in to OpenCode Console (opens browser,
+                       # prompts for org selection when the account has several)
 oc3 models --refresh   # fetch org models, cache them, write ~/.config/oc3/codex-models.json
 oc3 serve              # proxy on http://127.0.0.1:8788
 oc3                    # TUI: model picker + server toggle (s), refresh (r), quit (q)

@@ -32,6 +32,12 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
           const models = availableModels();
           return json({ object: "list", data: models.map((model) => ({ id: model.id, object: "model", owned_by: model.providerId })) });
         }
+        if (request.method === "GET" && (path === "/responses" || path === "/v1/responses" || path === "/backend-api/codex/responses")
+          && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          // Codex treats 426 as a session-wide fallback to HTTP POST (verified
+          // against ollama's internal/proxy/codex_desktop.go).
+          return json({ error: { message: "oc3 uses the HTTP Responses transport" } }, 426);
+        }
         const responsesMatch = request.method === "POST" && (path === "/responses" || path === "/v1/responses" || path === "/backend-api/codex/responses");
         if (responsesMatch) {
           requests += 1;
@@ -52,12 +58,32 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
   });
 }
 
+async function parseRequestBody(request: Request): Promise<Record<string, unknown>> {
+  const encoding = (request.headers.get("content-encoding") ?? "").trim().toLowerCase();
+  if (!encoding) return await request.json() as Record<string, unknown>;
+  const compressed = new Uint8Array(await request.arrayBuffer());
+  let decoded: Uint8Array;
+  if (encoding === "zstd") {
+    decoded = Bun.zstdDecompressSync(compressed);
+  } else if (encoding === "gzip") {
+    decoded = Bun.gunzipSync(compressed);
+  } else if (encoding === "deflate") {
+    decoded = Bun.inflateSync(compressed);
+  } else if (encoding === "identity" || encoding === "") {
+    decoded = compressed;
+  } else {
+    throw new Error(`Unsupported Content-Encoding: ${encoding}`);
+  }
+  return JSON.parse(new TextDecoder().decode(decoded)) as Record<string, unknown>;
+}
+
 async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: string): Promise<Response> {
   let body: Record<string, unknown>;
   try {
-    body = await request.json() as Record<string, unknown>;
-  } catch {
-    return json({ error: { message: "Invalid JSON body" } }, 400);
+    body = await parseRequestBody(request);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid JSON body";
+    return json({ error: { message } }, 400);
   }
   const requestedModel = typeof body.model === "string" ? body.model : "";
   const models = availableModels();
