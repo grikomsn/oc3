@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write  # npm trusted publishing / provenance
 
 jobs:
   release:
@@ -57,7 +58,7 @@ jobs:
             pkg_dir="npm-dist/@nbrst/oc3-${target}"
             mkdir -p "$pkg_dir/bin"
             cp "dist/oc3-${target}" "$pkg_dir/bin/oc3"
-            sed -e "s/TEMPLATE/@nbrst\/oc3-${target}/"                 -e "s/TEMPLATE_OS/${os}/"                 -e "s/TEMPLATE_ARCH/${arch}/"                 -e "s/0.1.0/${VERSION}/"                 npm/platform/package.json > "$pkg_dir/package.json"
+            sed -e "s/TEMPLATE/@nbrst\/oc3-${target}/"                 -e "s/TEMPLATE_OS/${os}/"                 -e "s/TEMPLATE_ARCH/${arch}/"                 -e "s/0.0.1/${VERSION}/"                 npm/platform/package.json > "$pkg_dir/package.json"
             cp LICENSE "$pkg_dir/LICENSE" 2>/dev/null || true
           done
           # wrapper package with versions synced to the tag
@@ -68,16 +69,17 @@ jobs:
             require('fs').writeFileSync('npm/package.json', JSON.stringify(pkg, null, 2) + '\n');
           " || true
 
-      - name: Publish to npm
-        if: ${{ secrets.NPM_TOKEN != '' }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish to npm (trusted publishing + provenance)
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          node -e "const v=require('node:child_process').execFileSync('npm',['--version'],{encoding:'utf8'}).trim(); const [major,minor]=v.split('.').map(Number); if (major < 11 || (major === 11 && minor < 5)) throw new Error('npm 11.5.1 or newer is required, found '+v)"
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             cd "npm-dist/@nbrst/oc3-${target}"
-            npm publish --access public
+            npm publish --access public --provenance
             cd -
           done
-          cd npm && npm publish --access public
+          cd npm && npm publish --access public --provenance
