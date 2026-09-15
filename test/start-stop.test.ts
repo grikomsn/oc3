@@ -94,16 +94,10 @@ describe("oc3 start/stop lifecycle", () => {
         return true;
       }
     }, 15_000);
-    await new Promise<void>((resolve) => {
-      start.on("exit", () => resolve());
-      setTimeout(resolve, 5000);
-    });
-
     const restored = readFileSync(`${CODEX_HOME}/config.toml`, "utf8");
     expect(restored).toBe(ORIGINAL_CONFIG);
     expect(existsSync(`${OC3_HOME_DIR}/codex-backup.json`)).toBe(false);
 
-    start.kill("SIGKILL");
     void startOutput;
   }, 30_000);
 });

@@ -32,17 +32,19 @@ export async function runTui(options: TuiOptions): Promise<void> {
   renderer.root.add(root);
 
   const header = new TextRenderable(renderer, { content: "oc3 — OpenCode Console proxy", fg: "#8AB4FF" });
+  const PAD = 100;
+  const pad = (value: string): string => value.padEnd(PAD);
   const account = new TextRenderable(renderer, { content: "", fg: "#9BE49B" });
   const serverStatus = new TextRenderable(renderer, { content: "", fg: "#F0C674" });
   const listTitle = new TextRenderable(renderer, { content: "Models:", fg: "#C5C8D6" });
-  const listBox = new BoxRenderable(renderer, { flexDirection: "column", height: 14, backgroundColor: "#101014" });
+  const listBox = new BoxRenderable(renderer, { flexDirection: "column", height: 12, backgroundColor: "#101014" });
   const listLines: TextRenderable[] = [];
-  for (let index = 0; index < 24; index += 1) {
+  for (let index = 0; index < 10; index += 1) {
     const line = new TextRenderable(renderer, { content: "", fg: "#888899" });
     listLines.push(line);
     listBox.add(line);
   }
-  const footer = new TextRenderable(renderer, { content: "s: toggle server  e: toggle config overrides  r: refresh models  q: quit", fg: "#707880" });
+  const footer = new TextRenderable(renderer, { content: "s: toggle server  e: toggle config overrides  r: refresh models  q: quit".padEnd(100), fg: "#707880" });
   const status = new TextRenderable(renderer, { content: "", fg: "#9BE494" });
 
   root.add(header);
@@ -68,23 +70,23 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return;
       }
       const marker = model.id === state.defaultModel ? "*" : index + start === selected ? ">" : " ";
-      line.content = `${marker} ${model.id.padEnd(44)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}`;
+      line.content = `${marker} ${model.id.padEnd(44)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}`.padEnd(PAD);
       line.fg = index + start === selected ? "#FFFFFF" : model.id === state.defaultModel ? "#9BE494" : "#888899";
       line.bg = index + start === selected ? "#22304a" : undefined;
     });
     if (!total) {
-      listLines[0]!.content = "  (no models cached — press r to refresh)";
+      listLines[0]!.content = "  (no models cached — press r to refresh)".padEnd(PAD);
       listLines[0]!.fg = "#888888";
     }
-    listTitle.content = `Models ${total ? `${selected + 1}/${total}` : "(0)"} — up/down move, Enter sets default, r refreshes:`;
+    listTitle.content = `Models ${total ? `${selected + 1}/${total}` : "(0)"} — up/down move, Enter sets default, r refreshes:`.padEnd(PAD);
   }
 
   function refreshStatus(): void {
     const session = options.auth.getSession();
-    account.content = session ? `account: ${session.email}  org: ${session.orgName ?? session.orgId ?? "none"}` : "not signed in — exit and run: oc3 login";
+    account.content = pad(session ? `account: ${session.email}  org: ${session.orgName ?? session.orgId ?? "none"}` : "not signed in — exit and run: oc3 login");
     const applied = overridesApplied({ model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${options.port}/v1` });
-    serverStatus.content = `${handle ? `server: http://127.0.0.1:${handle.port}  requests: ${handle.requestCount()}` : "server: stopped"}  config: ${applied ? "overridden" : "original"}`;
-    status.content = statusLine;
+    serverStatus.content = pad(`${handle ? `server: http://127.0.0.1:${handle.port}  requests: ${handle.requestCount()}` : "server: stopped"}  config: ${applied ? "overridden" : "original"}`);
+    status.content = pad(statusLine);
   }
 
   async function loadModels(refresh: boolean): Promise<void> {

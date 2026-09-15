@@ -4,8 +4,9 @@ import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer } from "./server";
 import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
-import { clearDaemonInfo, daemonRunning, launchChatGptDesktop, readDaemonInfo, removeStaleDaemonFile, stopDaemon, writeDaemonInfo } from "./daemon";
+import { clearDaemonInfo, daemonRunning, launchDetachedServe, launchChatGptDesktop, readDaemonInfo, removeStaleDaemonFile, serveLogPath, stopDaemon, writeDaemonInfo } from "./daemon";
 import { codexCatalogPath } from "./store";
+import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_CONSOLE_SERVER } from "./protocol";
 import { ensureHome, loadSession, loadState, saveState } from "./store";
 import { runTui } from "./tui";
@@ -111,9 +112,10 @@ async function main(): Promise<void> {
     }
     case "serve": {
       const handle = await startServer({ port: port(flags), auth });
+      writeDaemonInfo({ pid: process.pid, port: handle.port });
       console.log(`oc3 proxy listening on http://127.0.0.1:${handle.port}`);
       console.log(`Codex profile base_url: http://127.0.0.1:${handle.port}/v1`);
-      process.on("SIGINT", () => { handle.stop(); process.exit(0); });
+      process.on("SIGINT", () => { handle.stop(); clearDaemonInfo(); process.exit(0); });
       return;
     }
     case "start": {
@@ -133,15 +135,29 @@ async function main(): Promise<void> {
       const overrides = { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${p}/v1` };
       const result = applyCodexOverrides(overrides);
       console.log(`Config overrides ${result.changed ? `applied to ${codexConfigPath()}` : "already in place"} (backup: ${result.backupCreated ? "created" : "kept"})`);
-      const handle = await startServer({ port: p, auth });
-      writeDaemonInfo({ pid: process.pid, port: handle.port });
-      console.log(`oc3 proxy listening on http://127.0.0.1:${handle.port}`);
+      const cliEntry = Bun.argv[1] ?? "src/cli.ts";
+      const childPid = launchDetachedServe(cliEntry, p);
+      const ready = await waitForHealth(p, 10_000);
+      if (!ready) {
+        console.error("oc3 proxy did not become healthy in time. Check `oc3 logs`.");
+        process.exitCode = 1;
+        return;
+      }
+      writeDaemonInfo({ pid: childPid, port: p });
+      console.log(`oc3 proxy running on http://127.0.0.1:${p} (pid ${childPid}, detached)`);
       if (flags["no-launch"] !== true) {
         const launched = launchChatGptDesktop();
         console.log(launched ? "Booted ChatGPT desktop." : "Could not launch ChatGPT desktop (open -a ChatGPT).");
       }
-      console.log("Run `oc3 stop` to restore the previous endpoint and models.");
-      process.on("SIGINT", () => { handle.stop(); console.log("\nProxy stopped. Overrides remain applied; run `oc3 stop` to restore."); process.exit(0); });
+      console.log("Logs: `oc3 logs`  Status: `oc3 status`  Restore: `oc3 stop`");
+      return;
+    }
+    case "logs": {
+      const lines = Number(flags.lines ?? 30);
+      const path = serveLogPath();
+      if (!existsSync(path)) { console.log("No serve log yet. Start with: oc3 start"); return; }
+      const content = readFileSync(path, "utf8").split("\n");
+      console.log(content.slice(Math.max(0, content.length - Math.max(1, lines))).join("\n"));
       return;
     }
     case "stop": {
@@ -158,7 +174,8 @@ async function main(): Promise<void> {
       const info = readDaemonInfo();
       removeStaleDaemonFile();
       const live = info && daemonRunning(info);
-      const applied = overridesApplied({ model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${port(flags)}/v1` });
+      const effectivePort = live ? info!.port : port(flags);
+      const applied = overridesApplied({ model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${effectivePort}/v1` });
       console.log(`proxy: ${live ? `running on port ${info!.port} (pid ${info!.pid})` : "stopped"}`);
       console.log(`config overrides: ${applied ? "applied" : "not applied"} (${codexConfigPath()})`);
       return;
@@ -226,6 +243,18 @@ async function promptOrgChoice(count: number): Promise<number | undefined> {
   return index >= 0 && index < count ? index : undefined;
 }
 
+async function waitForHealth(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      if (response.ok) return true;
+    } catch { /* not ready yet */ }
+    await Bun.sleep(200);
+  }
+  return false;
+}
+
 function loadSessionSafe() {
   const auth = new OpenCodeAuth();
   return auth.getSession();
@@ -239,10 +268,11 @@ Usage:
   oc3 whoami              Show signed-in account and organizations
   oc3 org [--org ID]      List or select the active organization
   oc3 models [--refresh]  List models and regenerate the Codex catalog
-  oc3 start [--port N]    Apply config overrides, start the proxy, boot ChatGPT desktop
+  oc3 start [--port N]    Apply overrides, start detached proxy, boot ChatGPT desktop
                           (--no-launch skips booting ChatGPT desktop)
   oc3 stop                Restore previous config values and stop the proxy
   oc3 status              Show proxy and override state
+  oc3 logs [--lines N]    Show recent proxy log lines (default 30)
   oc3 serve [--port N]    Run the proxy server without touching config.toml
   oc3 catalog             Regenerate codex-models.json from cached models
   oc3 logout              Remove stored Console credentials
