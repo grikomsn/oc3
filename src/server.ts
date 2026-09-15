@@ -7,6 +7,8 @@ import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError
 import { SseParser } from "./sse-parser";
 import { applyReasoningWire, normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, TurnModelCache } from "./desktop-normalize";
 import { thinkingMetadataFor } from "./routing-catalog";
+import { anthropicRequestFromResponses, AnthropicStreamToResponses } from "./anthropic-bridge";
+import { googleRequestFromResponses, GoogleStreamToResponses } from "./google-bridge";
 
 export interface ServerHandle {
   port: number;
@@ -112,9 +114,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
     }, 404);
   }
   if (model.endpoint === "messages" || model.endpoint === "google") {
-    return json({
-      error: { message: `Model ${model.id} uses the ${model.endpoint} endpoint, which oc3 does not bridge yet.` },
-    }, 501);
+    return await handleBridgedEndpoint(request, body, model, auth, sessionId);
   }
   if (model.endpoint === "chat-completions" && body.stream !== true) {
     return json({ error: { message: "oc3 only proxies streaming requests (stream: true)" } }, 400);
@@ -223,6 +223,110 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
 async function passthroughError(upstream: Response): Promise<Response> {
   const text = await upstream.text().catch(() => "");
   return json({ error: { message: `Upstream error ${upstream.status}: ${text.slice(0, 2000)}` } }, upstream.status);
+}
+
+async function handleBridgedEndpoint(
+  request: Request,
+  body: Record<string, unknown>,
+  model: Oc3Model,
+  auth: OpenCodeAuth,
+  sessionId: string,
+): Promise<Response> {
+  const credential = process.env.OC3_TEST_TOKEN
+    ? { token: process.env.OC3_TEST_TOKEN, server: "", orgId: undefined, orgName: undefined }
+    : await auth.getCredential();
+  if (!credential.token) return json({ error: { message: "Not signed in. Run: oc3 login" } }, 401);
+  const requestId = newId("req");
+  const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
+  if (credential.orgId) headers["x-org-id"] = credential.orgId;
+  const responseId = newId("resp");
+
+  let upstreamBody: string;
+  let url: string;
+  let converter: { created(): unknown; ingest(event: Record<string, unknown>): unknown[]; finalize(stopReason: string | undefined): unknown[] };
+  if (model.endpoint === "messages") {
+    upstreamBody = JSON.stringify(anthropicRequestFromResponses(body, model));
+    url = endpointUrl(model.baseUrl, "messages", model.rawModelId);
+    const stream = new AnthropicStreamToResponses(responseId);
+    converter = { created: () => stream.created(), ingest: (event) => stream.ingest(event), finalize: (reason) => stream.finalize(reason) };
+  } else {
+    upstreamBody = JSON.stringify(googleRequestFromResponses(body, model));
+    url = endpointUrl(model.baseUrl, "google", model.rawModelId);
+    const stream = new GoogleStreamToResponses(responseId);
+    converter = { created: () => stream.created(), ingest: (event) => stream.ingest(event), finalize: (reason) => stream.finalize(reason) };
+  }
+
+  let attempt = 0;
+  let upstream: Response;
+  while (true) {
+    try {
+      upstream = await fetch(url, {
+        method: "POST",
+        headers,
+        body: upstreamBody,
+        signal: AbortSignal.timeout(600_000),
+      });
+    } catch (error) {
+      if (attempt < 2 && isTransientNetworkError(error)) {
+        await Bun.sleep(retryDelayMs(attempt++));
+        continue;
+      }
+      throw error;
+    }
+    if (!upstream.ok) {
+      const detail = await upstream.text().catch(() => "");
+      if (attempt < 2 && isTransientServerError(upstream.status, detail)) {
+        await Bun.sleep(retryDelayMs(attempt++));
+        continue;
+      }
+      return json({ error: { message: `Upstream error ${upstream.status}: ${detail.slice(0, 2000)}` } }, upstream.status);
+    }
+    break;
+  }
+  if (!upstream.body) return json({ error: { message: "Upstream returned no body" } }, 502);
+
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  void (async () => {
+    await writer.write(formatSseEvent(converter.created() as { event: string; data: Record<string, unknown> }));
+    const reader = upstream!.body!.getReader();
+    const decoder = new TextDecoder();
+    const parser = new SseParser();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const block of parser.push(decoder.decode(value, { stream: true }))) {
+          const data = parseSseData(`data: ${block.data}`);
+          if (!data) continue;
+          for (const event of converter.ingest(data)) {
+            await writer.write(formatSseEvent(event as { event: string; data: Record<string, unknown> }));
+          }
+        }
+      }
+      for (const block of parser.finish()) {
+        const data = parseSseData(`data: ${block.data}`);
+        if (!data) continue;
+        for (const event of converter.ingest(data)) {
+          await writer.write(formatSseEvent(event as { event: string; data: Record<string, unknown> }));
+        }
+      }
+      for (const event of converter.finalize(undefined)) {
+        await writer.write(formatSseEvent(event as { event: string; data: Record<string, unknown> }));
+      }
+      await writer.write(new TextEncoder().encode("data: [DONE]\n\n"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "stream failed";
+      await writer.write(formatSseEvent({ event: "error", data: { type: "error", message } }));
+    } finally {
+      await writer.close();
+      reader.releaseLock();
+    }
+  })();
+  return new Response(readable, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
+  });
 }
 
 const NATIVE_CHATGPT_BASE = "https://chatgpt.com/backend-api/codex";

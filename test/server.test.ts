@@ -31,6 +31,19 @@ const upstream = Bun.serve({
       });
       return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
     }
+    if (url.pathname.endsWith("/messages")) {
+      const stream = new ReadableStream({
+        start(controller) {
+          const enc = new TextEncoder();
+          controller.enqueue(enc.encode('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n'));
+          controller.enqueue(enc.encode('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi there"}}\n\n'));
+          controller.enqueue(enc.encode('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'));
+          controller.enqueue(enc.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
+    }
     if (url.pathname.endsWith("/responses")) {
       responsesRequests.push({ url: url.href, headers, body });
       const stream = new ReadableStream({
@@ -156,7 +169,7 @@ describe("oc3 proxy server", () => {
     handle.stop();
   });
 
-  test("rejects unbridged endpoint kinds with 501", async () => {
+  test("bridges messages-endpoint models through the Anthropic translator", async () => {
     mkdirSync(`${process.env.OC3_HOME}`, { recursive: true });
     writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify([
       {
@@ -179,7 +192,9 @@ describe("oc3 proxy server", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: "acme/claude-model", stream: true, input: "hi" }),
     });
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain("response.completed");
     handle.stop();
   });
 });
