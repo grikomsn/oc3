@@ -107,10 +107,15 @@ export function nativeOpenAiModels(): Oc3Model[] {
   return models;
 }
 
+export function modelKey(slug: string): string {
+  return slug.trim().toLowerCase().replace(/\[.*\]$/, "");
+}
+
 export function findModel(models: readonly Oc3Model[], requested: string): Oc3Model | undefined {
-  return models.find((model) => model.id === requested)
-    ?? models.find((model) => model.rawModelId === requested)
-    ?? models.find((model) => model.id === `openai/${requested}`);
+  const key = modelKey(requested);
+  return models.find((model) => modelKey(model.id) === key)
+    ?? models.find((model) => modelKey(model.rawModelId) === key)
+    ?? models.find((model) => modelKey(model.id) === modelKey(`openai/${key}`));
 }
 
 function withoutCredentials(value: Record<string, unknown>): Record<string, unknown> {

@@ -67,6 +67,9 @@ export function responsesRequestToChat(body: Record<string, unknown>, model: Oc3
   if (chatTools.length) {
     request.tools = chatTools;
     request.tool_choice = toolChoice(body.tool_choice);
+    if (body.parallel_tool_calls === true) {
+      (request as unknown as Record<string, unknown>).parallel_tool_calls = true;
+    }
   }
 
   const reasoning = recordField(body.reasoning);

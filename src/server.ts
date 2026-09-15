@@ -79,8 +79,14 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
   });
 }
 
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
 async function parseRequestBody(request: Request): Promise<Record<string, unknown>> {
   const encoding = (request.headers.get("content-encoding") ?? "").trim().toLowerCase();
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    throw new Error(`request body exceeds ${MAX_BODY_BYTES} bytes`);
+  }
   if (!encoding) return await request.json() as Record<string, unknown>;
   const compressed = new Uint8Array(await request.arrayBuffer());
   let decoded: Uint8Array;
