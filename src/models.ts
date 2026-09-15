@@ -101,7 +101,7 @@ export function nativeOpenAiModels(): Oc3Model[] {
       imageInput: true,
       toolCalling: true,
       endpoint: resolveEndpointKind(id, "zen", "@ai-sdk/openai"),
-      baseUrl: OPENAI_API_BASE,
+      baseUrl: process.env.OC3_OPENAI_BASE_URL ?? OPENAI_API_BASE,
     });
   }
   return models;

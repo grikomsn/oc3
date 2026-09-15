@@ -78,8 +78,8 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
 
   const credential = model.providerId === "openai"
     ? { token: process.env.OPENAI_API_KEY ?? "", server: "", orgId: undefined, orgName: undefined }
-    : model.baseUrl.includes("127.0.0.1")
-      ? { token: "test", server: "", orgId: undefined, orgName: undefined }
+    : process.env.OC3_TEST_TOKEN
+      ? { token: process.env.OC3_TEST_TOKEN, server: "", orgId: undefined, orgName: undefined }
       : await auth.getCredential();
   if (!credential.token) {
     return json({ error: { message: "No credentials for this model provider" } }, 401);

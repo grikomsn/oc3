@@ -85,12 +85,14 @@ beforeAll(() => {
   chatRequests = [];
   responsesRequests = [];
   process.env.OC3_HOME = `${HOME}/.config/oc3`;
+  process.env.OC3_TEST_TOKEN = "test";
   return writeCatalog();
 });
 
 afterAll(() => {
   upstream.stop(true);
   rmSync(HOME, { recursive: true, force: true });
+  delete process.env.OC3_TEST_TOKEN;
 });
 
 describe("oc3 proxy server", () => {
@@ -178,6 +180,48 @@ describe("oc3 proxy server", () => {
       body: JSON.stringify({ model: "acme/claude-model", stream: true, input: "hi" }),
     });
     expect(response.status).toBe(501);
+    handle.stop();
+  });
+});
+
+describe("native OpenAI bridge", () => {
+  test("routes openai/ models through the configured base URL", async () => {
+    mkdirSync(`${HOME}/.config/oc3`, { recursive: true });
+    writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify([]));
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.OC3_OPENAI_BASE_URL = `http://127.0.0.1:${UPSTREAM_PORT}/v1`;
+    try {
+      const handle = await startServer({ port: PROXY_PORT + 3, auth });
+      const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "openai/gpt-5.6-sol", stream: true, store: false, input: "hi" }),
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain("event: response.created");
+      expect(responsesRequests.length).toBeGreaterThanOrEqual(1);
+      const sent = responsesRequests.at(-1)!;
+      expect(sent.url).toBe(`http://127.0.0.1:${UPSTREAM_PORT}/v1/responses`);
+      expect(sent.headers.authorization).toBe("Bearer sk-test");
+      expect(sent.body.model).toBe("gpt-5.6-sol");
+      handle.stop();
+    } finally {
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.OC3_OPENAI_BASE_URL;
+    }
+  });
+
+  test("openai/ models are unavailable without OPENAI_API_KEY", async () => {
+    delete process.env.OPENAI_API_KEY;
+    writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify([]));
+    const handle = await startServer({ port: PROXY_PORT + 4, auth });
+    const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-5.6-sol", stream: true, input: "hi" }),
+    });
+    expect(response.status).toBe(404);
     handle.stop();
   });
 });

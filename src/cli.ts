@@ -108,6 +108,7 @@ async function main(): Promise<void> {
       const selected = typeof flags.model === "string" && flags.model ? flags.model : state.defaultModel ?? "<model-id>";
       const p = port(flags);
       console.log(`# Add to ~/.codex/config.toml manually (oc3 never writes it for you):`);
+      console.log(`[profiles.oc3]`);
       console.log(`model = "${selected}"`);
       console.log(`model_provider = "oc3"`);
       console.log("");
@@ -116,7 +117,7 @@ async function main(): Promise<void> {
       console.log(`base_url = "http://127.0.0.1:${p}/v1"`);
       console.log(`wire_api = "responses"`);
       console.log("");
-      console.log(`# Then run: codex --profile oc3  (after creating an [profiles.oc3] block or via -c overrides)`);
+      console.log(`# Then run: codex --profile oc3`);
       return;
     }
     case "catalog": {
