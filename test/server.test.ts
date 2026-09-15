@@ -23,8 +23,8 @@ const upstream = Bun.serve({
         start(controller) {
           const enc = new TextEncoder();
           controller.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"he"}}]}\n\n'));
-          controller.enqueue(enc.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"shell","arguments":"{\\"c\\"}"}}]}}]}\n\n'));
-          controller.enqueue(enc.encode('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}\n\n'));
+          controller.enqueue(enc.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"shell","arguments":"{\\"cmd\\":"}}]}}]}\n\n'));
+          controller.enqueue(enc.encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"type":"function","function":{"arguments":"\\"ls\\"}"}}]}}]}\n\n'));
           controller.enqueue(enc.encode("data: [DONE]\n\n"));
           controller.close();
         },
@@ -127,7 +127,7 @@ describe("oc3 proxy server", () => {
     expect(sent.body.model).toBe("fast-model");
     const messages = sent.body.messages as Array<Record<string, unknown>>;
     expect(messages[0]).toEqual({ role: "system", content: "Be brief." });
-    expect(messages[1]).toEqual({ role: "user", content: "run it" });
+    expect(messages[1]).toEqual({ role: "user", content: [{ type: "text", text: "run it" }] });
     const tools = sent.body.tools as Array<Record<string, unknown>>;
     expect(tools[0]!.function).toEqual({ name: "shell", description: "run shell", parameters: { type: "object" } });
     handle.stop();

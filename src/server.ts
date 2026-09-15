@@ -3,6 +3,8 @@ import { availableModels } from "./console";
 import { findModel, type Oc3Model } from "./models";
 import { buildRequestHeaders, endpointUrl, newId, USER_AGENT } from "./protocol";
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
+import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError, retryDelayMs } from "./retry";
+import { SseParser } from "./sse-parser";
 
 export interface ServerHandle {
   port: number;
@@ -91,11 +93,28 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
 
   if (model.endpoint === "responses") {
     const upstreamBody = JSON.stringify({ ...body, ...(model.body ?? {}), model: model.rawModelId, stream: true, store: false });
-    const upstream = await fetch(endpointUrl(model.baseUrl, "responses", model.rawModelId), {
-      method: "POST",
-      headers,
-      body: upstreamBody,
-    });
+    let upstream: Response;
+    let responsesAttempt = 0;
+    while (true) {
+      try {
+        upstream = await fetch(endpointUrl(model.baseUrl, "responses", model.rawModelId), {
+          method: "POST",
+          headers,
+          body: upstreamBody,
+        });
+      } catch (error) {
+        if (responsesAttempt < 2 && isTransientNetworkError(error)) {
+          await Bun.sleep(retryDelayMs(responsesAttempt++));
+          continue;
+        }
+        throw error;
+      }
+      if (!upstream.ok && responsesAttempt < 2 && isTransientServerError(upstream.status, "")) {
+        await Bun.sleep(retryDelayMs(responsesAttempt++));
+        continue;
+      }
+      break;
+    }
     if (!upstream.ok) return passthroughError(upstream);
     return new Response(upstream.body, {
       status: upstream.status,
@@ -104,14 +123,39 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   }
 
   const chatRequest = responsesRequestToChat(body, model);
-  const upstream = await fetch(endpointUrl(model.baseUrl, "chat-completions", model.rawModelId), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(chatRequest),
-  });
-  if (!upstream.ok) return passthroughError(upstream);
-  if (!upstream.body) return json({ error: { message: "Upstream returned no body" } }, 502);
-  return streamChatToResponses(upstream.body);
+  const chatUrl = endpointUrl(model.baseUrl, "chat-completions", model.rawModelId);
+  let attempt = 0;
+  let currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
+  while (true) {
+    let upstream: Response;
+    try {
+      upstream = await fetch(chatUrl, { method: "POST", headers, body: JSON.stringify(currentBody) });
+    } catch (error) {
+      if (attempt < 2 && isTransientNetworkError(error)) {
+        await Bun.sleep(retryDelayMs(attempt++));
+        continue;
+      }
+      throw error;
+    }
+    if (!upstream.ok) {
+      const detail = await upstream.text().catch(() => "");
+      if (attempt < 2 && isTransientServerError(upstream.status, detail)) {
+        await Bun.sleep(retryDelayMs(attempt++));
+        continue;
+      }
+      if (upstream.status === 400 && attempt < 2) {
+        const patch = analyzeHttp400ForRetry(detail, currentBody);
+        if (patch) {
+          currentBody = patch.body;
+          attempt += 1;
+          continue;
+        }
+      }
+      return json({ error: { message: `Upstream error ${upstream.status}: ${detail.slice(0, 2000)}` } }, upstream.status);
+    }
+    if (!upstream.body) return json({ error: { message: "Upstream returned no body" } }, 502);
+    return streamChatToResponses(upstream.body, toolSchemas(body));
+  }
 }
 
 async function passthroughError(upstream: Response): Promise<Response> {
@@ -119,9 +163,23 @@ async function passthroughError(upstream: Response): Promise<Response> {
   return json({ error: { message: `Upstream error ${upstream.status}: ${text.slice(0, 2000)}` } }, upstream.status);
 }
 
-async function streamChatToResponses(body: ReadableStream<Uint8Array>): Promise<Response> {
+function toolSchemas(body: Record<string, unknown>): ReadonlyMap<string, Record<string, unknown>> {
+  const schemas = new Map<string, Record<string, unknown>>();
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
+    const record = tool as Record<string, unknown>;
+    if (record.type === "function" && typeof record.name === "string"
+      && record.parameters && typeof record.parameters === "object" && !Array.isArray(record.parameters)) {
+      schemas.set(record.name, record.parameters as Record<string, unknown>);
+    }
+  }
+  return schemas;
+}
+
+async function streamChatToResponses(body: ReadableStream<Uint8Array>, schemas: ReadonlyMap<string, Record<string, unknown>> = new Map()): Promise<Response> {
   const responseId = newId("resp");
-  const converter = new ChatStreamToResponses(responseId);
+  const converter = new ChatStreamToResponses(responseId, schemas);
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -129,20 +187,24 @@ async function streamChatToResponses(body: ReadableStream<Uint8Array>): Promise<
     await writer.write(formatSseEvent(converter.created()));
     const reader = body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+    const parser = new SseParser();
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const data = parseSseData(line.trim());
+        for (const block of parser.push(decoder.decode(value, { stream: true }))) {
+          const data = parseSseData(`data: ${block.data}`);
           if (!data) continue;
           for (const event of converter.ingest(data)) {
             await writer.write(formatSseEvent(event));
           }
+        }
+      }
+      for (const block of parser.finish()) {
+        const data = parseSseData(`data: ${block.data}`);
+        if (!data) continue;
+        for (const event of converter.ingest(data)) {
+          await writer.write(formatSseEvent(event));
         }
       }
       for (const event of converter.finalize(undefined)) {
