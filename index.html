@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>oc3 — OpenCode Console proxy for Codex</title>
+    <meta name="description" content="A minimal local proxy that lets OpenAI Codex and ChatGPT desktop use OpenCode Console models. Device-code OAuth, Responses-API bridging, hosted web search, and native OpenAI fallback.">
+    <meta property="og:title" content="oc3 — OpenCode Console proxy for Codex">
+    <meta property="og:description" content="A minimal local proxy that lets OpenAI Codex and ChatGPT desktop use OpenCode Console models.">
+    <meta property="og:url" content="https://grikomsn.github.io/oc3/">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="oc3 — OpenCode Console proxy for Codex">
+    <meta name="twitter:description" content="A minimal local proxy that lets OpenAI Codex and ChatGPT desktop use OpenCode Console models.">
+    <link rel="canonical" href="https://grikomsn.github.io/oc3/">
+    <meta name="robots" content="index, follow">
+    <meta name="theme-color" content="#6366f1" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "oc3",
+        "description": "A minimal local proxy that lets OpenAI Codex and ChatGPT desktop use OpenCode Console models.",
+        "url": "https://grikomsn.github.io/oc3/",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "softwareVersion": "0.1.0",
+        "license": "https://opensource.org/licenses/MIT",
+        "isAccessibleForFree": true,
+        "codeRepository": "https://github.com/grikomsn/oc3",
+        "programmingLanguage": "TypeScript",
+        "author": {
+            "@type": "Person",
+            "name": "Griko Nibras",
+            "url": "https://github.com/grikomsn"
+        }
+    }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #fafafa;
+            --bg-secondary: #f5f5f5;
+            --text: #1a1a1a;
+            --text-secondary: #666;
+            --text-muted: #888;
+            --accent: #6366f1;
+            --border: #e5e5e5;
+            --code-bg: #1a1a1a;
+            --code-text: #e5e5e5;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0a0a0a;
+                --bg-secondary: #141414;
+                --text: #e5e5e5;
+                --text-secondary: #a0a0a0;
+                --text-muted: #666;
+                --accent: #818cf8;
+                --border: #262626;
+                --code-bg: #141414;
+                --code-text: #e5e5e5;
+            }
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: "IBM Plex Mono", monospace;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            max-width: 680px;
+            margin: 0 auto;
+            padding: 3rem 1.5rem;
+            font-size: 14px;
+        }
+
+        header { margin-bottom: 3rem; }
+
+        .badge {
+            color: var(--accent);
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .badge::before { content: "[*] "; }
+
+        h1 {
+            font-size: 20px;
+            font-weight: 600;
+            margin: 1rem 0 0.5rem;
+            letter-spacing: -0.01em;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            line-height: 1.7;
+        }
+
+        .subtitle a {
+            color: var(--text);
+            text-decoration: none;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .subtitle a:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .deploy {
+            margin: 2.5rem 0;
+        }
+
+        .label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.75rem;
+        }
+
+        pre {
+            background: var(--code-bg);
+            color: var(--code-text);
+            padding: 1rem 1.25rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 13px;
+            cursor: pointer;
+            border: 1px solid var(--border);
+        }
+
+        pre:hover {
+            opacity: 0.9;
+        }
+
+        .method {
+            margin: 1.5rem 0;
+        }
+
+        .method-title {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .method-title code {
+            color: var(--accent);
+            font-weight: 500;
+        }
+
+        section {
+            margin: 2.5rem 0;
+            padding-top: 2.5rem;
+            border-top: 1px solid var(--border);
+        }
+
+        h2 {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 1rem;
+        }
+
+        h2::before { content: "[*] "; }
+
+        ul {
+            list-style: none;
+        }
+
+        li {
+            padding: 0.5rem 0;
+            color: var(--text-secondary);
+        }
+
+        code {
+            color: var(--accent);
+            font-size: 12px;
+        }
+
+        a {
+            color: var(--text);
+            text-decoration: none;
+            border-bottom: 1px solid var(--border);
+        }
+
+        a:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        footer {
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        footer a {
+            color: var(--text-muted);
+            border: none;
+        }
+
+        footer a:hover {
+            color: var(--text);
+        }
+
+        .note {
+            margin-top: 1rem;
+            color: var(--text-muted);
+            font-size: 12px;
+        }
+
+        @media (max-width: 600px) {
+            body { padding: 2rem 1rem; }
+            h1 { font-size: 18px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <span class="badge">v0.1.0</span>
+        <h1>oc3</h1>
+        <p class="subtitle">A minimal local proxy that lets <a href="https://openai.com/codex/">OpenAI Codex</a> and ChatGPT desktop use <a href="https://opencode.ai/console">OpenCode Console</a> models — device-code OAuth, Responses-API bridging, hosted web search, and native OpenAI fallback through one local endpoint.</p>
+    </header>
+
+    <div class="deploy">
+        <p class="label">Quick start</p>
+        <pre onclick="copy(this)">git clone https://github.com/grikomsn/oc3.git
+cd oc3 &amp;&amp; bun install
+bun src/cli.ts login</pre>
+        <p class="note">Or run without cloning: <code>bun x github:grikomsn/oc3</code></p>
+    </div>
+
+    <div class="deploy">
+        <p class="label">Run</p>
+        <pre onclick="copy(this)">bun src/cli.ts start    # overrides config, boots proxy + ChatGPT desktop
+bun src/cli.ts stop     # restores previous config, stops proxy</pre>
+    </div>
+
+    <section>
+        <h2>How it routes</h2>
+
+        <div class="method">
+            <p class="method-title"><code>responses</code> — GPT, Grok, Muse models on Console</p>
+            <pre onclick="copy(this)"># Near-passthrough: OAuth + x-opencode-* headers injected,
+# SSE relayed verbatim between Codex and Console</pre>
+        </div>
+
+        <div class="method">
+            <p class="method-title"><code>chat-completions</code> — everything else</p>
+            <pre onclick="copy(this)"># Full translation: Responses requests -> Chat Completions,
+# streaming events re-emitted Codex-side (tool calls, reasoning,
+# truncated stops, usage details)</pre>
+        </div>
+
+        <div class="method">
+            <p class="method-title"><code>messages</code> / <code>google</code> — Claude and Gemini on Console</p>
+            <pre onclick="copy(this)"># Bridged via Anthropic Messages and Gemini GenerateContent
+# translators (thinking, tool_use, functionCall, usage)</pre>
+        </div>
+
+        <div class="method">
+            <p class="method-title"><code>web_search</code> — hosted tool on any model</p>
+            <pre onclick="copy(this)"># Codex's hosted web_search tool is bridged client-side via
+# Exa/Parallel MCP, mirroring OpenCode's own implementation</pre>
+        </div>
+    </section>
+
+    <section>
+        <h2>Features</h2>
+        <ul>
+            <li>Device-code OAuth with single-flight token refresh and org switching</li>
+            <li>Schema-aware tool-argument repair (integral floats, string-typed ints)</li>
+            <li>Strict usage details on every response (strict Responses clients)</li>
+            <li>Routing catalog with per-model thinking/effort normalization</li>
+            <li>Auto-review alias resolution, Full-Access exec schema scrubbing</li>
+            <li>Native OpenAI fallback with client auth (ChatGPT backend or API key)</li>
+            <li>ChatGPT desktop transport: 426 HTTP fallback, zstd request bodies</li>
+            <li>OpenTUI dashboard: model picker, server + config override toggles</li>
+            <li>Detached daemon with <code>oc3 status</code> / <code>oc3 logs</code> / one-command restore</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>Links</h2>
+        <ul>
+            <li><a href="https://github.com/grikomsn/oc3">github.com/grikomsn/oc3</a></li>
+            <li><a href="https://github.com/grikomsn/oc3/blob/main/README.md">documentation</a></li>
+            <li><a href="https://opencode.ai/console">opencode.ai/console</a></li>
+            <li><a href="https://github.com/lidge-jun/opencodex">lidge-jun/opencodex</a> — related, heavier-weight alternative</li>
+   <li><a href="https://github.com/ollama/ollama">ollama</a> — codex proxy contract reference</li>
+        </ul>
+    </section>
+
+    <footer>
+        <p>MIT License · <a href="https://github.com/grikomsn">grikomsn</a> · Not affiliated with OpenAI or OpenCode</p>
+    </footer>
+
+    <script>
+        function copy(el) {
+            navigator.clipboard.writeText(el.textContent.trim());
+        }
+    </script>
+</body>
+</html>
