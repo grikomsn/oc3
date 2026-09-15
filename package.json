@@ -1,0 +1,22 @@
+{
+  "name": "oc3",
+  "version": "0.1.0",
+  "description": "Minimal OpenCode Console proxy for Codex and ChatGPT desktop",
+  "type": "module",
+  "bin": {
+    "oc3": "./src/cli.ts"
+  },
+  "scripts": {
+    "oc3": "bun src/cli.ts",
+    "serve": "bun src/cli.ts serve",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.1.26"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.8.0"
+  }
+}
