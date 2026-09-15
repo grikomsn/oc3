@@ -158,7 +158,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
 
   if (model.endpoint === "responses") {
-    const upstreamBody = JSON.stringify({ ...body, ...(model.body ?? {}), model: model.rawModelId, stream: true, store: false });
+    const upstreamBody = JSON.stringify({ ...body, ...withoutCredentialOptions(model.body), model: model.rawModelId, stream: true, store: false });
     let upstream: Response;
     let responsesAttempt = 0;
     while (true) {
@@ -541,6 +541,12 @@ async function passthroughNative(request: Request, body: Record<string, unknown>
     status: upstream.status,
     headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
   });
+}
+
+function withoutCredentialOptions(body: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!body) return {};
+  const stripped = Object.fromEntries(Object.entries(body).filter(([key]) => !/^(api_?key|base_?url|headers)$/i.test(key)));
+  return stripped;
 }
 
 function pickDefaultModel(models: readonly Oc3Model[]): string | undefined {

@@ -67,7 +67,7 @@ export function modelsFromProvider(providerId: string, provider: ProviderSource)
       endpoint: resolveEndpointKind(modelId, "console", packageName),
       baseUrl,
       ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
-      ...(provider.options ? { body: provider.options } : {}),
+      ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
     }];
   });
 }
@@ -111,6 +111,10 @@ export function findModel(models: readonly Oc3Model[], requested: string): Oc3Mo
   return models.find((model) => model.id === requested)
     ?? models.find((model) => model.rawModelId === requested)
     ?? models.find((model) => model.id === `openai/${requested}`);
+}
+
+function withoutCredentials(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "apiKey" && key !== "headers" && key !== "api_key" && key !== "baseUrl" && key !== "api"));
 }
 
 function positive(value: unknown, fallback: number): number {
