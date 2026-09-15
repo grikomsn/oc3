@@ -10,8 +10,11 @@ native OpenAI models when `OPENAI_API_KEY` is set.
 ## Install
 
 ```bash
-bun install
-bun link  # optional: exposes `oc3` on PATH
+# One-liner (downloads a Bun-compiled binary from GitHub Releases)
+curl -fsSL https://oc3.nbr.st/install | bash
+
+# Or from a local checkout
+bun install && bun link
 ```
 
 ## Usage

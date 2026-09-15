@@ -11,6 +11,10 @@ import { DEFAULT_CONSOLE_SERVER } from "./protocol";
 import { ensureHome, loadSession, loadState, saveState } from "./store";
 import { runTui } from "./tui";
 
+// Injected at build time by the release workflow (--define OC3_VERSION)
+declare const OC3_VERSION: string | undefined;
+const version = JSON.parse(typeof OC3_VERSION !== "undefined" ? OC3_VERSION : "\"dev\"") as string;
+
 interface Args {
   command: string;
   flags: Record<string, string | boolean>;
@@ -211,7 +215,12 @@ async function main(): Promise<void> {
     case "help":
     case "--help":
     case "-h": {
-      console.log(USAGE);
+      console.log(`oc3 ${version}\n\n${USAGE}`);
+      return;
+    }
+    case "version":
+    case "--version": {
+      console.log(`oc3 ${version}`);
       return;
     }
     default: {

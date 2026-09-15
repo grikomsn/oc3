@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build per-platform binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bun build ./src/cli.ts --compile --minify \
+              --target="bun-${target}" \
+              --outfile "dist/oc3-${target}" \
+              --define "OC3_VERSION='\"${VERSION}\"'"
+            tar -czf "dist/oc3-${VERSION}-${target}.tar.gz" -C dist "oc3-${target}"
+            shasum -a 256 "dist/oc3-${VERSION}-${target}.tar.gz" >> dist/checksums.txt
+          done
+          rm -f dist/oc3-darwin-arm64 dist/oc3-darwin-x64 dist/oc3-linux-x64 dist/oc3-linux-arm64
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

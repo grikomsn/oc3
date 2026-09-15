@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP=oc3
+REPO="grikomsn/oc3"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; MUTED='\033[0;2m'; NC='\033[0m'
+
+requested_version=${VERSION:-}
+install_dir=${OC3_INSTALL_DIR:-}
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -v|--version)
+      if [ -n "${2:-}" ]; then requested_version="$2"; shift 2; else echo "Error: --version requires a value" >&2; exit 1; fi ;;
+    -b|--binary)
+      if [ -n "${2:-}" ]; then binary_path="$2"; shift 2; else echo "Error: --binary requires a path" >&2; exit 1; fi ;;
+    --no-modify-path) no_modify_path=true; shift ;;
+    -h|--help)
+      echo "oc3 installer"
+      echo "Usage: install [options]"
+      echo "  -v, --version <version>  Install a specific version (e.g. 0.1.0)"
+      echo "  -b, --binary <path>      Install from a local binary"
+      echo "  --no-modify-path         Don't modify shell config files"
+      echo "  OC3_INSTALL_DIR env      Custom install directory"
+      exit 0 ;;
+    *) echo "Unknown option '$1'" >&2; shift ;;
+  esac
+done
+
+# Detect platform
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$os" in
+  darwin) os="darwin" ;;
+  linux) os="linux" ;;
+  *) echo -e "${RED}Unsupported OS: $os (macOS and Linux only)${NC}" >&2; exit 1 ;;
+esac
+arch=$(uname -m)
+case "$arch" in
+  arm64|aarch64) arch="arm64" ;;
+  x86_64) arch="x64" ;;
+  *) echo -e "${RED}Unsupported architecture: $arch${NC}" >&2; exit 1 ;;
+esac
+target="${os}-${arch}"
+
+# Pick install dir (opencode-style priority)
+if [ -n "$install_dir" ]; then
+  :
+elif [ -n "${XDG_BIN_DIR:-}" ]; then
+  install_dir="$XDG_BIN_DIR"
+elif [ -d "$HOME/bin" ] || mkdir -p "$HOME/bin" 2>/dev/null; then
+  install_dir="$HOME/bin"
+else
+  install_dir="$HOME/.oc3/bin"
+fi
+mkdir -p "$install_dir"
+
+if [ -n "${binary_path:-}" ]; then
+  [ -f "$binary_path" ] || { echo -e "${RED}Binary not found at $binary_path${NC}" >&2; exit 1; }
+  cp "$binary_path" "$install_dir/oc3"
+  chmod +x "$install_dir/oc3"
+  echo -e "${GREEN}Installed local binary to $install_dir/oc3${NC}"
+  exit 0
+fi
+
+# Resolve version
+if [ -n "$requested_version" ]; then
+  version="${requested_version#v}"
+else
+  specific=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | awk -F'"' '/"tag_name": "/ {gsub(/^v/, "", $4); print $4}')
+  if [ -z "$specific" ]; then
+    echo -e "${RED}Failed to resolve the latest release${NC}" >&2
+    exit 1
+  fi
+  specific=$(echo "$specific" | tail -1)
+  version="$specific"
+fi
+
+archive="oc3-${version}-${target}.tar.gz"
+url="https://github.com/$REPO/releases/download/v${version}/$archive"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+echo "Downloading oc3 ${version} for ${target}..."
+if ! curl -fsSL -o "$tmp/archive" "$url"; then
+  echo -e "${RED}Download failed: $url${NC}" >&2
+  echo -e "${MUTED}Check https://github.com/$REPO/releases${NC}" >&2
+  exit 1
+fi
+
+# Verify checksum
+if command -v shasum >/dev/null 2>&1; then sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+elif command -v sha256sum >/dev/null 2>&1; then sha256() { sha256sum "$1" | awk '{print $1}'; }
+else echo -e "${YELLOW}No sha256 tool found; skipping checksum verification${NC}" >&2
+fi
+if command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1; then
+  expected=$(curl -fsSL "https://github.com/$REPO/releases/download/v${version}/checksums.txt" | awk -v f="$archive" '$2 == f {print $1}')
+  actual=$(sha256 "$tmp/archive")
+  if [ -n "$expected" ] && [ "$expected" != "$(sha256 "$tmp/archive")" ]; then
+    echo -e "${RED}Checksum mismatch for $archive${NC}" >&2
+    exit 1
+  fi
+  if [ -n "$expected" ]; then
+    echo -e "${MUTED}Checksum verified${NC}"
+  fi
+fi
+
+tar -xzf "$tmp/archive" -C "$tmp"
+mv "$tmp/oc3-${target}" "$install_dir/oc3"
+chmod +x "$install_dir/oc3"
+echo -e "${GREEN}Installed oc3 ${version} to $install_dir/oc3${NC}"
+
+# PATH hint
+case ":$PATH:" in
+  *":$install_dir:"*) ;;
+  *)
+    if [ "${no_modify_path:-false}" != "true" ]; then
+      shell_rc="$HOME/.zshrc"
+      [ -n "${ZSH_VERSION:-}" ] || shell_rc="$HOME/.bashrc"
+      printf '\nexport PATH="%s:$PATH"\n' "$install_dir" >> "$shell_rc"
+      echo "Added $install_dir to PATH in $shell_rc (restart shell to take effect)"
+    else
+      echo -e "${YELLOW}Add $install_dir to your PATH${NC}"
+    fi
+    ;;
+esac
+
+"$install_dir/oc3" --version 2>/dev/null || true
