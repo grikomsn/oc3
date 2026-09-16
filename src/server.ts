@@ -1,13 +1,13 @@
 import { OpenCodeAuth } from "./auth";
 import { availableModels } from "./console";
-import { findModel, type Oc3Model } from "./models";
+import { findModel, modelGroup, type Oc3Model } from "./models";
 import { buildRequestHeaders, endpointUrl, nativeChatGptBase, nativeOpenAiBase, newId, userAgent } from "./protocol";
 import { credentialErrorHint, credentialForModel } from "./credentials";
 import { gatewayChatTemplateArgs, gatewayResponsesExtras } from "./zen";
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
 import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError, retryDelayMs } from "./retry";
 import { SseParser } from "./sse-parser";
-import { applyReasoningWire, normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, TurnModelCache } from "./desktop-normalize";
+import { applyReasoningWire, extractTurnMetadata, normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, sanitizeCrossProviderHistory, TurnModelCache } from "./desktop-normalize";
 import { thinkingMetadataFor } from "./routing-catalog";
 import { executeWebSearch, searchBridgeNeeded, stripHostedSearchTool } from "./web-search";
 import { truncatedStopReason } from "./stop-reason";
@@ -118,7 +118,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   const models = availableModels();
   let model = findModel(models, requestedModel);
   if (!model) {
-    const autoReview = resolveAutoReview(requestedModel, body, turnModels, pickDefaultModel(models));
+    const autoReview = resolveAutoReview(requestedModel, body, turnModels, pickDefaultModel(models), pickDefaultGroup(models));
     if (autoReview) {
       body = autoReview.body;
       model = findModel(models, autoReview.model);
@@ -168,7 +168,13 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
 
   const requestId = newId("req");
   const headers = buildRequestHeaders(model.endpoint, credential.token, userAgent(), requestId, sessionId, model.headers ?? {});
-  if (credential.orgId) headers["x-org-id"] = credential.orgId;
+  applyOrgHeaders(headers, credential.orgId);
+
+  const { turnId } = extractTurnMetadata(body);
+  turnModels.remember(turnId, requestedModel || model.id, modelGroup(model));
+  const previousGroup = turnModels.lookup(extractTurnMetadata(body).parentTurnId)?.group;
+  const sanitized = sanitizeCrossProviderHistory(body, previousGroup, modelGroup(model));
+  body = sanitized.body;
 
   if (model.endpoint === "responses") {
     const gatewayExtras = model.providerId.startsWith("opencode") ? gatewayResponsesExtras(body, sessionId) : {};
@@ -196,7 +202,10 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
       }
       break;
     }
-    if (!upstream.ok) return passthroughError(upstream);
+    if (!upstream.ok) {
+      const detail = await upstream.text().catch(() => "");
+      return gatewayErrorResponse(model, upstream.status, detail);
+    }
     return new Response(upstream.body, {
       status: upstream.status,
       headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" },
@@ -248,7 +257,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
           continue;
         }
       }
-      return json({ error: { message: `Upstream error ${upstream.status}: ${detail.slice(0, 2000)}` } }, upstream.status);
+      return gatewayErrorResponse(model, upstream.status, detail);
     }
     if (!upstream.body) return json({ error: { message: "Upstream returned no body" } }, 502);
     return streamChatToResponses(upstream.body, toolSchemas(body));
@@ -259,6 +268,7 @@ async function passthroughError(upstream: Response): Promise<Response> {
   const text = await upstream.text().catch(() => "");
   return json({ error: { message: `Upstream error ${upstream.status}: ${text.slice(0, 2000)}` } }, upstream.status);
 }
+
 
 async function handleBridgedEndpoint(
   request: Request,
@@ -271,7 +281,7 @@ async function handleBridgedEndpoint(
   if (!credential) return json({ error: { message: credentialErrorHint(model) } }, 401);
   const requestId = newId("req");
   const headers = buildRequestHeaders(model.endpoint, credential.token, userAgent(), requestId, sessionId, model.headers ?? {});
-  if (credential.orgId) headers["x-org-id"] = credential.orgId;
+  applyOrgHeaders(headers, credential.orgId);
   const responseId = newId("resp");
 
   let upstreamBody: string;
@@ -312,7 +322,7 @@ async function handleBridgedEndpoint(
         await Bun.sleep(retryDelayMs(attempt++));
         continue;
       }
-      return json({ error: { message: `Upstream error ${upstream.status}: ${detail.slice(0, 2000)}` } }, upstream.status);
+      return gatewayErrorResponse(model, upstream.status, detail);
     }
     break;
   }
@@ -410,7 +420,7 @@ async function runOneChatTurn(
   if (!credential) return 401;
   const requestId = newId("req");
   const headers = buildRequestHeaders(model.endpoint, credential.token, userAgent(), requestId, sessionId, model.headers ?? {});
-  if (credential.orgId) headers["x-org-id"] = credential.orgId;
+  applyOrgHeaders(headers, credential.orgId);
   const chatRequest = responsesRequestToChat(body, model);
   let attempt = 0;
   let currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
@@ -558,6 +568,22 @@ async function passthroughNative(request: Request, body: Record<string, unknown>
   });
 }
 
+// Console references disagree on the inference org header (copilot-chat sends
+// x-org-id, pi-provider sends x-opencode-org-id); send both until verified live.
+function gatewayErrorResponse(model: Oc3Model, status: number, detail: string): Response {
+  const gateway = model.providerId === "opencode" || model.providerId === "opencode-go";
+  const message = gateway && status === 429
+    ? `Upstream error ${status}: ${detail.slice(0, 2000)} — OpenCode gateway rate limit or subscription quota reached; run \`oc3 usage\` for Go quota (keys: https://opencode.ai/auth)`
+    : `Upstream error ${status}: ${detail.slice(0, 2000)}`;
+  return json({ error: { message } }, status);
+}
+
+function applyOrgHeaders(headers: Record<string, string>, orgId: string | undefined): void {
+  if (!orgId) return;
+  headers["x-org-id"] = orgId;
+  headers["x-opencode-org-id"] = orgId;
+}
+
 function withoutCredentialOptions(body: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!body) return {};
   const stripped = Object.fromEntries(Object.entries(body).filter(([key]) => !/^(api_?key|base_?url|headers)$/i.test(key)));
@@ -566,6 +592,10 @@ function withoutCredentialOptions(body: Record<string, unknown> | undefined): Re
 
 function pickDefaultModel(models: readonly Oc3Model[]): string | undefined {
   return models[0]?.id;
+}
+
+function pickDefaultGroup(models: readonly Oc3Model[]): string | undefined {
+  return models[0] ? modelGroup(models[0]) : undefined;
 }
 
 function toolSchemas(body: Record<string, unknown>): ReadonlyMap<string, Record<string, unknown>> {

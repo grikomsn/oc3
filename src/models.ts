@@ -14,6 +14,7 @@ export interface ModelSource {
   disabled?: boolean;
   provider?: { npm?: string; api?: string };
   options?: Record<string, unknown>;
+  cost?: { input?: number; output?: number; context_over_200k?: number };
 }
 
 export interface ProviderSource {
@@ -37,6 +38,11 @@ export interface Oc3Model {
   toolCalling: boolean;
   endpoint: EndpointKind;
   baseUrl: string;
+  // Supported reasoning efforts from the catalog (models.dev reasoning_options);
+  // undefined means the family defaults apply.
+  reasoningEfforts?: string[];
+  // USD per million tokens from the catalog, when published.
+  cost?: { input?: number; output?: number; inputOver200k?: number };
   // Which catalog produced this entry; gateway ids may also appear in the
   // Console org config, where the Console session token is the credential.
   source?: "console" | "gateway";
@@ -70,6 +76,7 @@ export function modelsFromProvider(providerId: string, provider: ProviderSource)
       endpoint: resolveEndpointKind(modelId, "console", packageName),
       baseUrl,
       source: "console",
+      ...spreadMetadata(source),
       ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
       ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
     }];
@@ -101,6 +108,7 @@ export function modelsFromGatewayProvider(providerId: string, provider: Provider
       endpoint: resolveEndpointKind(modelId, mode, packageName),
       baseUrl,
       source: "gateway",
+      ...spreadMetadata(source),
       ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
       ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
     }];
@@ -122,6 +130,13 @@ export function minimalGatewayModel(providerId: string, mode: "zen" | "go", rawM
     endpoint: resolveEndpointKind(rawModelId, mode),
     baseUrl: apiBaseForMode(mode),
     source: "gateway",
+  };
+}
+
+function spreadMetadata(source: ModelSource): Partial<Oc3Model> {
+  return {
+    ...(reasoningEffortsFromSource(source) ? { reasoningEfforts: reasoningEffortsFromSource(source) } : {}),
+    ...(costFromSource(source) ? { cost: costFromSource(source) } : {}),
   };
 }
 
@@ -158,6 +173,34 @@ export function nativeOpenAiModels(): Oc3Model[] {
     });
   }
   return models;
+}
+
+const KNOWN_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** Catalog reasoning_options -> canonical effort list (unknown values ignored). */
+export function reasoningEffortsFromSource(source: ModelSource): string[] | undefined {
+  const options = Array.isArray(source.reasoning_options) ? source.reasoning_options : [];
+  const found = new Set<string>();
+  for (const option of options) {
+    const values = option && Array.isArray(option.values) ? option.values : [];
+    for (const value of values) {
+      if (typeof value === "string" && KNOWN_EFFORTS.includes(value.toLowerCase())) {
+        found.add(value.toLowerCase());
+      }
+    }
+  }
+  if (!found.size) return undefined;
+  return [...found].sort((a, b) => KNOWN_EFFORTS.indexOf(a) - KNOWN_EFFORTS.indexOf(b));
+}
+
+function costFromSource(source: ModelSource): Oc3Model["cost"] {
+  const cost = source.cost;
+  if (!cost || typeof cost !== "object" || Array.isArray(cost)) return undefined;
+  const result: Oc3Model["cost"] = {};
+  if (typeof cost.input === "number") result.input = cost.input;
+  if (typeof cost.output === "number") result.output = cost.output;
+  if (typeof cost.context_over_200k === "number") result.inputOver200k = cost.context_over_200k;
+  return Object.keys(result).length ? result : undefined;
 }
 
 // Display metadata -----------------------------------------------------------

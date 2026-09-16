@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, TurnModelCache } from "../src/desktop-normalize";
+import { normalizeFullAccessExecTool, normalizeInputItems, normalizeReasoningForModel, resolveAutoReview, sanitizeCrossProviderHistory, TurnModelCache } from "../src/desktop-normalize";
 import { normalizeReasoningEffort, thinkingMetadataFor } from "../src/routing-catalog";
 import type { Oc3Model } from "../src/models";
 
@@ -39,8 +39,8 @@ describe("normalizeFullAccessExecTool", () => {
 describe("auto-review alias", () => {
   test("tracks turn models and resolves the alias to the parent turn's model", () => {
     const cache = new TurnModelCache(4);
-    resolveAutoReview("acme/gpt-5.6-sol", { client_metadata: { turn_id: "t1" } }, cache, "acme/gpt-5.6-sol");
-    const resolved = resolveAutoReview("codex-auto-review", { client_metadata: { parent_turn_id: "t1" } }, cache, "acme/gpt-5.6-sol");
+    resolveAutoReview("acme/gpt-5.6-sol", { client_metadata: { turn_id: "t1" } }, cache, "acme/gpt-5.6-sol", "openai");
+    const resolved = resolveAutoReview("codex-auto-review", { client_metadata: { parent_turn_id: "t1" } }, cache, "acme/gpt-5.6-sol", "openai");
     expect(resolved).toBeDefined();
     expect(resolved!.model).toBe("acme/gpt-5.6-sol");
     expect(resolved!.body.model).toBe("acme/gpt-5.6-sol");
@@ -88,5 +88,47 @@ describe("routing catalog thinking metadata", () => {
   test("returns per-family levels for reasoning models", () => {
     expect(thinkingMetadataFor(glm)!.levels).toEqual(["low", "high", "max"]);
     expect(thinkingMetadataFor({ ...glm, rawModelId: "fast", reasoning: false })).toBeUndefined();
+  });
+});
+
+describe("cross-provider history sanitation", () => {
+  const body = {
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      { type: "reasoning", id: "rs_1234", encrypted_content: "AAAA", summary: [] },
+      { type: "reasoning", id: "reasoning_plain", summary: [{ type: "summary_text", text: "thinking" }] },
+      { type: "function_call", call_id: "call_1", name: "shell", arguments: "{}" },
+    ],
+  };
+
+  test("drops backend-encrypted reasoning items on backend-family switches", () => {
+    const { body: next, changed } = sanitizeCrossProviderHistory(body, "zen", "console");
+    expect(changed).toBe(true);
+    const input = next.input as Array<Record<string, unknown>>;
+    expect(input).toHaveLength(3);
+    expect(input.find((item) => item.type === "reasoning" && item.id === "reasoning_plain")).toBeDefined();
+  });
+
+  test("keeps history when the backend family is unchanged or unknown", () => {
+    expect(sanitizeCrossProviderHistory(body, "zen", "zen").changed).toBe(false);
+    expect(sanitizeCrossProviderHistory(body, undefined, "zen").changed).toBe(false);
+  });
+
+  test("keeps plain reasoning summaries across families", () => {
+    const plainOnly = { input: [{ type: "reasoning", id: "reasoning_plain", summary: [] }] };
+    const { body: next, changed } = sanitizeCrossProviderHistory(plainOnly, "zen", "console");
+    expect(changed).toBe(false);
+    expect(next.input).toHaveLength(1);
+  });
+});
+
+describe("turn model cache groups", () => {
+  test("remembers and reports the backend family per turn", () => {
+    const cache = new TurnModelCache(4);
+    cache.remember("t1", "zen/gpt", "zen");
+    cache.remember("t2", "console/claude", "console");
+    expect(cache.lookup("t1")?.group).toBe("zen");
+    expect(cache.lookup("t2")?.group).toBe("console");
+    expect(cache.lookup("missing")).toBeUndefined();
   });
 });

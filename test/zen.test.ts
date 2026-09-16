@@ -3,7 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, write
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
 import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection } from "../src/store";
-import { modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, type ProviderSource } from "../src/models";
+import { modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, reasoningEffortsFromSource, type ProviderSource } from "../src/models";
+import { writeCodexCatalog } from "../src/codex-catalog";
 import { credentialForModel, credentialErrorHint } from "../src/credentials";
 import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayResponsesExtras } from "../src/zen";
 import type { Oc3Model } from "../src/models";
@@ -100,6 +101,8 @@ const zenCatalogProvider: ProviderSource = {
       attachment: true,
       limit: { context: 400000, output: 128000 },
       provider: { npm: "@ai-sdk/openai" },
+      reasoning_options: [{ type: "string", values: ["low", "HIGH", "banana"] }],
+      cost: { input: 1.5, output: 10, context_over_200k: 3 },
     },
     "gemini-flash": {
       name: "Gemini via Zen",
@@ -190,6 +193,37 @@ describe("gateway catalog parsing", () => {
     const go = modelsFromGatewayProvider("opencode-go", goCatalogProvider, "go");
     expect(go[0]!.id).toBe("opencode-go/minimax-m3");
     expect(go[0]!.endpoint).toBe("messages");
+  });
+
+  test("carries catalog reasoning efforts and cost metadata", () => {
+    const zen = modelsFromGatewayProvider("opencode", zenCatalogProvider, "zen");
+    const gpt = zen.find((model) => model.rawModelId === "gpt-model")!;
+    expect(gpt.reasoningEfforts).toEqual(["low", "high"]);
+    expect(gpt.cost).toEqual({ input: 1.5, output: 10, inputOver200k: 3 });
+    const gemini = zen.find((model) => model.rawModelId === "gemini-flash")!;
+    expect(gemini.reasoningEfforts).toBeUndefined();
+    expect(gemini.cost).toBeUndefined();
+  });
+
+  test("reasoningEffortsFromSource ignores unknown values", () => {
+    expect(reasoningEffortsFromSource({ reasoning_options: [{ values: ["nope", "banana", "high"] }] })).toEqual(["high"]);
+    expect(reasoningEffortsFromSource({})).toBeUndefined();
+  });
+
+  test("codex catalog derives per-model reasoning levels and routing metadata", async () => {
+    const zen = modelsFromGatewayProvider("opencode", zenCatalogProvider, "zen");
+    await writeCodexCatalog(zen);
+    const codex = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-models.json`, "utf8")) as {
+      models: Array<{ slug: string; supported_reasoning_levels: Array<{ effort: string }>; default_reasoning_level: string }>;
+    };
+    const gptEntry = codex.models.find((model) => model.slug === "opencode/gpt-model")!;
+    expect(gptEntry.supported_reasoning_levels.map((level) => level.effort)).toEqual(["low", "high"]);
+    expect(gptEntry.default_reasoning_level).toBe("low");
+    const routing = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-routing.json`, "utf8")) as {
+      models: Array<{ slug: string; thinking?: { levels: string[] } }>;
+    };
+    const routingEntry = routing.models.find((model) => model.slug === "opencode/gpt-model")!;
+    expect(routingEntry.thinking?.levels).toEqual(["low", "high"]);
   });
 
   test("minimalGatewayModel applies heuristic endpoint kinds", () => {
@@ -403,6 +437,27 @@ describe("refresh error surfacing", () => {
   });
 });
 
+describe("console org headers", () => {
+  test("sends both x-org-id and x-opencode-org-id on console-routed requests", async () => {
+    saveCatalogSection("console", [gatewayModel({ source: "console", providerId: "console-org", id: "console-org/gpt-model", baseUrl: `http://127.0.0.1:${GO_PORT}/v1` })]);
+    writeSession("session-token");
+    const handle = await startServer({ port: PROXY_PORT + 4, auth });
+    const response = await postResponses(handle.port, {
+      model: "console-org/gpt-model",
+      stream: true,
+      store: false,
+      input: "hello",
+    });
+    expect(response.status).toBe(200);
+    const request = goRequests[goRequests.length - 1]!;
+    expect(request.headers.authorization).toBe("Bearer session-token");
+    expect(request.headers["x-org-id"]).toBe("org-1");
+    expect(request.headers["x-opencode-org-id"]).toBe("org-1");
+    handle.stop();
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+  });
+});
+
 describe("oc3 proxy server with gateway models", () => {
   beforeAll(() => {
     saveKeys({ zen: "zen-key-123" });
@@ -444,6 +499,7 @@ describe("oc3 proxy server with gateway models", () => {
   });
 
   test("proxies Responses requests to Zen with the gateway key and parity extras", async () => {
+    zenRequests.length = 0;
     const handle = await startServer({ port: PROXY_PORT, auth });
     const response = await postResponses(handle.port, {
       model: "opencode/gpt-model",
@@ -462,6 +518,7 @@ describe("oc3 proxy server with gateway models", () => {
     expect(request.url).toBe(`http://127.0.0.1:${ZEN_PORT}/v1/responses`);
     expect(request.headers.authorization).toBe("Bearer zen-key-123");
     expect(request.headers["x-opencode-client"]).toBe("oc3");
+    expect(request.headers["x-opencode-project"]).toBe("oc3");
     expect(request.body.prompt_cache_key).toBeString();
     expect(request.body.include).toContain("reasoning.encrypted_content");
     expect(request.body.reasoning).toEqual({ effort: "high", summary: "auto" });
@@ -469,6 +526,7 @@ describe("oc3 proxy server with gateway models", () => {
   });
 
   test("bridges Go chat-completions models and tolerates the trailing cost chunk", async () => {
+    goRequests.length = 0;
     const handle = await startServer({ port: PROXY_PORT + 1, auth });
     const response = await postResponses(handle.port, {
       model: "opencode-go/fast",
@@ -487,6 +545,7 @@ describe("oc3 proxy server with gateway models", () => {
   });
 
   test("sends gateway chat_template_args to thinking-mode chat models", async () => {
+    goRequests.length = 0;
     const handle = await startServer({ port: PROXY_PORT + 3, auth });
     const response = await postResponses(handle.port, {
       model: "opencode-go/kimi-k2-thinking",
@@ -503,6 +562,8 @@ describe("oc3 proxy server with gateway models", () => {
   });
 
   test("messages models on the gateway use the gateway key via x-api-key", async () => {
+    goRequests.length = 0;
+    const handle = await startServer({ port: PROXY_PORT + 2, auth });
     saveCatalogSection("go", [
       {
         id: "opencode-go/minimax-m3",
@@ -519,7 +580,6 @@ describe("oc3 proxy server with gateway models", () => {
         source: "gateway",
       },
     ]);
-    const handle = await startServer({ port: PROXY_PORT + 2, auth });
     const response = await postResponses(handle.port, {
       model: "opencode-go/minimax-m3",
       stream: true,

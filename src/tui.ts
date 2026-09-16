@@ -66,6 +66,10 @@ export async function runTui(options: TuiOptions): Promise<void> {
   root.add(status);
   root.add(footer);
 
+  function trimNumber(value: number): string {
+    return String(Number(value.toFixed(2)));
+  }
+
   function renderList(): void {
     const viewportHeight = 10;
     const total = models.length;
@@ -81,7 +85,8 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return;
       }
       const marker = model.id === state.defaultModel ? "*" : index + start === selected ? ">" : " ";
-      line.content = `${marker} ${model.id.padEnd(44)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}`.padEnd(PAD);
+      const cost = model.cost?.input !== undefined ? ` $${trimNumber(model.cost.input)}` : "";
+      line.content = `${marker} ${model.id.padEnd(44)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}${cost}`.padEnd(PAD);
       line.fg = index + start === selected ? "#FFFFFF" : model.id === state.defaultModel ? "#9BE494" : "#888899";
       line.bg = index + start === selected ? "#22304a" : undefined;
     });

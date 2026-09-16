@@ -39,7 +39,8 @@ export function thinkingMetadataFor(model: Oc3Model): ThinkingMetadata | undefin
   if (!model.reasoning) return undefined;
   const family = thinkingFamily(model.rawModelId, model.name);
   if (!family) return undefined;
-  const levels = FAMILY_LEVELS[family] ?? ["low", "medium", "high"];
+  // Catalog-declared efforts win; family defaults are the fallback.
+  const levels = model.reasoningEfforts?.length ? model.reasoningEfforts : FAMILY_LEVELS[family] ?? ["low", "medium", "high"];
   const values: Record<string, unknown> = {};
   if (family === "qwen" || family === "kimi") values["none"] = false;
   return { supported: true, levels, values: Object.keys(values).length ? values : undefined };

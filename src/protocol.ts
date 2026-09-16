@@ -85,6 +85,7 @@ export function buildRequestHeaders(
     "Content-Type": "application/json",
     "User-Agent": userAgent,
     "x-opencode-client": OPENCODE_CLIENT,
+    "x-opencode-project": OPENCODE_CLIENT,
     "x-opencode-request": requestId,
     "x-opencode-session": sessionId,
   };

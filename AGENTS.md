@@ -7,7 +7,7 @@ OpenCode Console models. It exposes an OpenAI Responses-API endpoint, translates
 to whatever the Console model speaks, and manages config overrides for Codex.
 
 - Bun + TypeScript. Node.js 24 is only needed for npm scripts.
-- State lives in `~/.config/oc3` (`session.json` is `0600`, never commit it).
+- State lives in `~/.config/oc3`: `session.json` (Console OAuth, 0600), `keys.json` (Zen/Go API keys, 0600), and the sectioned `models.json` cache. Never commit them.
 - The Codex config profile is written under `[profiles.oc3]` + `[model_providers.oc3]`;
   top-level `~/.codex/config.toml` values are only touched by the
   backup/restore in `start`/`stop`.
@@ -19,7 +19,9 @@ to whatever the Console model speaks, and manages config overrides for Codex.
 - `src/translate.ts`: Responses ⇄ Chat Completions translation and the `EmittedEvent` contract (strict usage details, stop reasons, tool-call items).
 - `src/desktop-normalize.ts`: ChatGPT-desktop request normalization (routing catalog thinking, auto-review alias, Full-Access exec, custom tool calls).
 - `src/auth.ts`: device-code OAuth, single-flight refresh, org selection.
-- `src/console.ts` / `src/models.ts`: Console model catalog and per-model endpoint kinds.
+- `src/console.ts` / `src/models.ts`: model catalog cache (sectioned console/zen/go), per-model metadata (endpoint kinds, reasoning efforts, cost, backend groups/labels).
+- `src/zen.ts` / `src/credentials.ts`: OpenCode gateway (Zen/Go) catalogs and per-model credential routing (native OpenAI keys, gateway API keys, Console OAuth sessions).
+- `src/codex-catalog.ts` / `src/routing-catalog.ts`: Codex picker catalog (per-model reasoning levels, backend labels) and thinking-metadata routing file.
 - `src/routing-catalog.ts` / `src/reasoning.ts`: thinking metadata and per-family effort wire formats.
 - `src/repair.ts`: schema-aware tool-argument coercion and apply_patch envelope repair.
 - `src/web-search.ts`: Exa/Parallel MCP bridging for the hosted `web_search` tool.
@@ -31,7 +33,7 @@ to whatever the Console model speaks, and manages config overrides for Codex.
 ## Development
 
 - Two-space indentation, double quotes, semicolons, explicit types at API boundaries.
-- Keep the stateless contract: Codex sends `store: false` with full history; never hold conversation state.
+- Keep the stateless contract: Codex sends `store: false` with full history; never hold conversation state. Cross-provider history sanitation (dropping backend-encrypted reasoning items on backend-family switches) is the one session-scoped transform.
 - Never log or commit OAuth tokens, request bodies, or captured responses.
 - Auth headers must match the injected-credential contract in `buildRequestHeaders`; do not impersonate the official Codex CLI.
 - Treat Console and ChatGPT backends as undocumented integration surfaces; parse defensively and keep protocol-specific behavior covered by tests.

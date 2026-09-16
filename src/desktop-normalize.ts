@@ -69,8 +69,13 @@ export function extractTurnMetadata(body: Record<string, unknown>): { turnId?: s
   };
 }
 
+export interface TurnEntry {
+  model: string;
+  group: string;
+}
+
 export class TurnModelCache {
-  private readonly models = new Map<string, string>();
+  private readonly models = new Map<string, TurnEntry>();
   private readonly order: string[] = [];
   private readonly limit: number;
 
@@ -78,21 +83,21 @@ export class TurnModelCache {
     this.limit = limit;
   }
 
-  remember(turnId: string | undefined, model: string): void {
+  remember(turnId: string | undefined, model: string, group: string): void {
     if (!turnId?.trim() || !model.trim()) return;
     if (this.models.has(turnId)) {
-      this.models.set(turnId, model);
+      this.models.set(turnId, { model, group });
       return;
     }
     if (this.order.length >= this.limit) {
       const oldest = this.order.shift();
       if (oldest) this.models.delete(oldest);
     }
-    this.models.set(turnId, model);
+    this.models.set(turnId, { model, group });
     this.order.push(turnId);
   }
 
-  lookup(turnId: string | undefined): string | undefined {
+  lookup(turnId: string | undefined): TurnEntry | undefined {
     return turnId ? this.models.get(turnId) : undefined;
   }
 }
@@ -102,18 +107,49 @@ export function resolveAutoReview(
   body: Record<string, unknown>,
   cache: TurnModelCache,
   defaultModel: string | undefined,
+  defaultGroup: string | undefined,
 ): { model: string; body: Record<string, unknown>; rewritten: boolean } | undefined {
   if (modelKey(requestedModel) !== AUTO_REVIEW_MODEL) {
     const { turnId } = extractTurnMetadata(body);
-    cache.remember(turnId, requestedModel);
+    cache.remember(turnId, requestedModel, defaultGroup ?? "other");
     return undefined;
   }
   let selected = defaultModel;
   if (!selected) return undefined;
   const { parentTurnId } = extractTurnMetadata(body);
-  const turnModel = cache.lookup(parentTurnId);
+  const turnModel = cache.lookup(parentTurnId)?.model;
   if (turnModel) selected = turnModel;
   return { model: selected, body: { ...body, model: selected }, rewritten: true };
+}
+
+// --- cross-provider history sanitation ---
+// Reasoning items carry backend-encrypted content (Codex ids look like rs_*).
+// When a conversation switches backend family mid-session, the new backend
+// cannot decrypt the previous one's reasoning items (ollama's
+// codex_desktop_normalize.go drops them on provider switches too).
+
+export function sanitizeCrossProviderHistory(
+  body: Record<string, unknown>,
+  previousGroup: string | undefined,
+  currentGroup: string,
+): { body: Record<string, unknown>; changed: boolean } {
+  if (!previousGroup || previousGroup === currentGroup) return { body, changed: false };
+  const input = body.input;
+  if (!Array.isArray(input)) return { body, changed: false };
+  let changed = false;
+  const next = input.filter((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+    const record = item as Record<string, unknown>;
+    if (record.type !== "reasoning") return true;
+    const encrypted = typeof record.encrypted_content === "string" && record.encrypted_content;
+    const nativeId = typeof record.id === "string" && /^rs_/.test(record.id);
+    if (encrypted || nativeId) {
+      changed = true;
+      return false;
+    }
+    return true;
+  });
+  return changed ? { body: { ...body, input: next }, changed } : { body, changed: false };
 }
 
 // --- input item conversion for custom tool calls ---

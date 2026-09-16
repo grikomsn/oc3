@@ -11,6 +11,34 @@ const DEFAULT_REASONING_LEVELS = [
   { description: "Exhaustive responses with maximum thinking", effort: "xhigh" },
 ];
 
+const LEVEL_DESCRIPTIONS: Record<string, string> = {
+  none: "Turn thinking off",
+  minimal: "Minimal thinking",
+  low: "Fast responses with lighter thinking",
+  medium: "Balanced responses with regular thinking",
+  high: "Thorough responses with deeper thinking",
+  xhigh: "Exhaustive responses with maximum thinking",
+  max: "Exhaustive responses with maximum thinking",
+};
+
+// Codex picker levels for one model: the catalog's own reasoning options when
+// present, otherwise the full default set.
+function reasoningLevelsFor(model: Oc3Model): Array<{ description: string; effort: string }> {
+  if (!model.reasoning) return DEFAULT_REASONING_LEVELS.slice(0, 1);
+  const efforts = model.reasoningEfforts?.length ? model.reasoningEfforts : ["none", "low", "medium", "high", "xhigh"];
+  return efforts.map((effort) => ({ description: LEVEL_DESCRIPTIONS[effort] ?? `${effort} thinking`, effort }));
+}
+
+function defaultReasoningLevel(model: Oc3Model): string {
+  if (!model.reasoning) return "none";
+  const levels = reasoningLevelsFor(model).map((level) => level.effort);
+  if (levels.includes("medium")) return "medium";
+  for (const preferred of ["low", "high", "max", "xhigh", "minimal"]) {
+    if (levels.includes(preferred)) return preferred;
+  }
+  return levels.at(-1) ?? "none";
+}
+
 const FALLBACK_BASE_INSTRUCTIONS = "You are a helpful coding agent. Complete the user's task using the provided tools.";
 
 export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<void> {
@@ -23,7 +51,7 @@ export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<vo
       availability_nux: null,
       base_instructions: baseInstructions,
       context_window: model.contextLength,
-      default_reasoning_level: model.reasoning ? "medium" : "none",
+      default_reasoning_level: defaultReasoningLevel(model),
       default_reasoning_summary: "auto",
       default_service_tier: null,
       default_verbosity: null,
@@ -43,7 +71,7 @@ export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<vo
       slug: model.id,
       support_verbosity: false,
       supported_in_api: true,
-      supported_reasoning_levels: model.reasoning ? DEFAULT_REASONING_LEVELS : DEFAULT_REASONING_LEVELS.slice(0, 1),
+      supported_reasoning_levels: reasoningLevelsFor(model),
       supports_image_detail_original: false,
       supports_parallel_tool_calls: model.toolCalling,
       supports_reasoning_summaries: false,

@@ -3,6 +3,7 @@ import * as clack from "@clack/prompts";
 import { existsSync, readFileSync } from "node:fs";
 import { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
+import type { Oc3Model } from "./models";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer } from "./server";
 import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
@@ -159,7 +160,8 @@ async function main(): Promise<void> {
       await writeCodexCatalog(models);
       console.log(`Found ${models.length} models. Codex catalog written.`);
       for (const model of models) {
-        console.log(`  ${model.id.padEnd(48)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}`);
+        const cost = costLabel(model.cost);
+        console.log(`  ${model.id.padEnd(48)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}${cost}`);
       }
       return;
     }
@@ -260,6 +262,17 @@ async function main(): Promise<void> {
 
 // Interactive key flow, styled after opencode's `opencode auth login`
 // (@clack/prompts select + masked password input).
+function costLabel(cost: Oc3Model["cost"]): string {
+  if (!cost || (cost.input === undefined && cost.output === undefined)) return "";
+  const input = cost.input !== undefined ? `$${trimNumber(cost.input)}` : "?";
+  const output = cost.output !== undefined ? `$${trimNumber(cost.output)}` : "?";
+  return `  ${input}/${output} per Mtok`;
+}
+
+function trimNumber(value: number): string {
+  return Number(value.toFixed(2)).toString();
+}
+
 async function interactiveKeys(): Promise<void> {
   clack.intro("OpenCode gateway keys");
   const action = await clack.select({
