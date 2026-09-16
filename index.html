@@ -231,62 +231,40 @@
     <header>
         <span class="badge">v0.0.1</span>
         <h1>oc3</h1>
-        <p class="subtitle">A minimal local proxy that lets <a href="https://openai.com/codex/">OpenAI Codex</a> and ChatGPT desktop use <a href="https://opencode.ai/console">OpenCode Console</a> models — device-code OAuth, Responses-API bridging, hosted web search, and native OpenAI fallback through one local endpoint.</p>
+        <p class="subtitle">Run <a href="https://opencode.ai/console">OpenCode Console</a> models in <a href="https://openai.com/codex/">OpenAI Codex</a> and ChatGPT desktop — one local proxy, any Console model.</p>
     </header>
 
     <div class="deploy">
         <p class="label">Install</p>
         <pre onclick="copy(this)">npm install -g @nbrst/oc3</pre>
-        <pre onclick="copy(this)">curl -fsSL https://oc3.nbr.st/install | bash</pre>
-        <p class="note">Standalone Bun binaries for macOS (arm64/x64) and Linux (x64/arm64) — no runtime required. Or clone and <code>bun install</code>.</p>
+        <p class="note">Or <code>npx @nbrst/oc3</code> to try it, or <code>curl -fsSL https://oc3.nbr.st/install | bash</code> for a standalone binary (macOS arm64/x64, Linux x64/arm64).</p>
     </div>
 
     <div class="deploy">
-        <p class="label">Run</p>
-        <pre onclick="copy(this)">bun src/cli.ts start    # overrides config, boots proxy + ChatGPT desktop
-bun src/cli.ts stop     # restores previous config, stops proxy</pre>
+        <p class="label">Use</p>
+        <pre onclick="copy(this)">oc3 login   # device-code sign in to OpenCode Console
+oc3 start   # proxy + config override + boots ChatGPT desktop
+oc3 stop    # restores your previous config, stops the proxy</pre>
     </div>
 
     <section>
         <h2>How it routes</h2>
-
-        <div class="method">
-            <p class="method-title"><code>responses</code> — GPT, Grok, Muse models on Console</p>
-            <pre onclick="copy(this)"># Near-passthrough: OAuth + x-opencode-* headers injected,
-# SSE relayed verbatim between Codex and Console</pre>
-        </div>
-
-        <div class="method">
-            <p class="method-title"><code>chat-completions</code> — everything else</p>
-            <pre onclick="copy(this)"># Full translation: Responses requests -> Chat Completions,
-# streaming events re-emitted Codex-side (tool calls, reasoning,
-# truncated stops, usage details)</pre>
-        </div>
-
-        <div class="method">
-            <p class="method-title"><code>messages</code> / <code>google</code> — Claude and Gemini on Console</p>
-            <pre onclick="copy(this)"># Bridged via Anthropic Messages and Gemini GenerateContent
-# translators (thinking, tool_use, functionCall, usage)</pre>
-        </div>
-
-        <div class="method">
-            <p class="method-title"><code>web_search</code> — hosted tool on any model</p>
-            <pre onclick="copy(this)"># Codex's hosted web_search tool is bridged client-side via
-# Exa/Parallel MCP, mirroring OpenCode's own implementation</pre>
-        </div>
+        <ul>
+            <li><code>responses</code> — GPT/Grok/Muse models: near-passthrough, SSE relayed verbatim</li>
+            <li><code>chat-completions</code> — full Responses translation: tool calls, reasoning, strict usage</li>
+            <li><code>messages</code> / <code>google</code> — Anthropic and Gemini bridges</li>
+            <li><code>web_search</code> — hosted tool bridged client-side via Exa/Parallel MCP</li>
+            <li>not in catalog — native OpenAI / ChatGPT fallback with the client's own auth</li>
+        </ul>
     </section>
 
     <section>
-        <h2>Features</h2>
+        <h2>Also included</h2>
         <ul>
-            <li>Device-code OAuth with single-flight token refresh and org switching</li>
-            <li>Schema-aware tool-argument repair (integral floats, string-typed ints)</li>
-            <li>Strict usage details on every response (strict Responses clients)</li>
-            <li>Routing catalog with per-model thinking/effort normalization</li>
-            <li>Auto-review alias resolution, Full-Access exec schema scrubbing</li>
-            <li>Native OpenAI fallback with client auth (ChatGPT backend or API key)</li>
-            <li>ChatGPT desktop transport: 426 HTTP fallback, zstd request bodies</li>
-            <li>OpenTUI dashboard: model picker, server + config override toggles</li>
+            <li>Schema-aware tool-argument repair, apply_patch envelope repair, strict usage details</li>
+            <li>Thinking/effort normalization per model family via a routing catalog</li>
+            <li>Auto-review alias resolution and Full-Access exec schema scrubbing for desktop</li>
+            <li>WebSocket attempts answered with 426 HTTP fallback; zstd request bodies accepted</li>
             <li>Detached daemon with <code>oc3 status</code> / <code>oc3 logs</code> / one-command restore</li>
         </ul>
     </section>

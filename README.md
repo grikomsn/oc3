@@ -1,85 +1,81 @@
 # oc3
 
-OpenCode Console proxy for Codex and ChatGPT desktop.
+Run [OpenCode Console](https://opencode.ai/console) models in OpenAI Codex and ChatGPT desktop — one local proxy, any Console model.
 
-oc3 runs a local Responses-API endpoint that routes Codex traffic to OpenCode Console
-models (device-code OAuth, no API key) — the same pattern as `codex --oss` with Ollama,
-but for Console. It also bridges models that only speak Chat Completions, and can expose
-native OpenAI models when `OPENAI_API_KEY` is set.
+```shell
+npx @nbrst/oc3
+```
+
+**That's it.** `oc3` signs in to Console with device-code OAuth, opens the model TUI, and points Codex at it via config-profile overrides. ChatGPT desktop, Codex CLI, and the Codex SDK all work through the same endpoint.
 
 ## Install
 
-```bash
-# One-liner (downloads a Bun-compiled binary from GitHub Releases)
-curl -fsSL https://oc3.nbr.st/install | bash
+```shell
+# npx (no install)
+npx @nbrst/oc3
+# or
+bunx @nbrst/oc3
 
-# Or via npm (wraps the same prebuilt binaries)
+# install globally
 npm install -g @nbrst/oc3
 
-# Or from a local checkout
-bun install && bun link
+# or via the install script (prebuilt Bun binaries, no npm needed)
+curl -fsSL https://oc3.nbr.st/install | bash
 ```
+
+macOS (arm64/x64) and Linux (x64/arm64). Windows is not supported yet.
 
 ## Usage
 
-```bash
-oc3 login              # device-code sign in to OpenCode Console (opens browser,
-                       # prompts for org selection when the account has several)
-oc3 models --refresh   # fetch org models, cache them, write ~/.config/oc3/codex-models.json
-oc3 serve              # proxy on http://127.0.0.1:8788
-oc3                    # TUI: model picker + server toggle (s), refresh (r), quit (q)
-oc3 snippet            # print the Codex config.toml profile block
-oc3 org [--org ID]     # list or select active Console organization
-oc3 logout
-```
+| Command | What it does |
+|---|---|
+| `oc3` | TUI: pick a model, toggle server + config override, quit |
+| `oc3 start` | Apply overrides, start a detached proxy, boot ChatGPT desktop |
+| `oc3 stop` | Restore your previous config and stop the proxy |
+| `oc3 login` | Device-code sign in to OpenCode Console |
+| `oc3 serve` | Proxy only, config untouched |
 
-## Wiring Codex manually
+First run: `oc3 login` (opens the browser, picks the org), then `oc3 start`. Codex
+and ChatGPT desktop are pointed at `http://127.0.0.1:8788` via the `[profiles.oc3]`
+block — `oc3 start` writes it, `oc3 stop` removes it.
 
-Paste the output of `oc3 snippet` into `~/.codex/config.toml`:
+## How routing works
 
-```toml
-model = "acme/gpt-5.6-sol"
-model_provider = "oc3"
+| Console model endpoint | What oc3 does |
+|---|---|
+| `responses` (gpt, grok, muse) | Near-passthrough: OAuth + `x-opencode-*` headers injected, SSE relayed verbatim |
+| `chat-completions` | Full Responses ⇄ Chat Completions translation (tool calls, reasoning, truncated stops, strict usage) |
+| `messages` / `google` | Anthropic Messages and Gemini GenerateContent bridges |
+| `web_search` | Bridged client-side via Exa/Parallel MCP, mirroring OpenCode's own tool |
+| not in catalog | Falls back to native OpenAI / ChatGPT backends with the client's own auth |
 
-[model_providers.oc3]
-name = "OpenCode Console (oc3)"
-base_url = "http://127.0.0.1:8788/v1"
-wire_api = "responses"
-```
+Extras baked in: schema-aware tool-argument repair, strict usage details,
+thinking/effort normalization per model family, 426 fallback for desktop
+WebSocket attempts, zstd request bodies, and a routing catalog with per-model
+thinking metadata.
 
-Because it is a named provider, oc3 never collides with Ollama's top-level
-`openai_base_url` override. Point the Codex desktop app at the same URL.
+## Environment
 
-## How it routes
-
-| Model endpoint (Console) | Behavior |
-| --- | --- |
-| `responses` (gpt-\*, grok-4, muse-spark) | Near-passthrough: injects OAuth bearer + `x-opencode-*` headers, forwards SSE |
-| `chat-completions` (default) | Translates Responses requests to Chat Completions and re-emits Responses SSE events |
-| `messages` / `google` | Not bridged yet (501) |
-
-State lives in `OC3_HOME` (default `~/.config/oc3`):
-
-- `session.json` — Console OAuth session (`0600`)
-- `models.json` — cached org model catalog
-- `codex-models.json` — Codex `model_catalog_json` file
-- `state.json` — default model selected in the TUI
-
-## Native OpenAI models
-
-Set `OPENAI_API_KEY` to expose `openai/<model>` slugs (default:
-`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`; override with `OC3_OPENAI_MODELS`).
-Requests route to `api.openai.com` using the Responses endpoint.
+| Variable | Purpose |
+|---|---|
+| `OC3_HOME` | State directory (default `~/.config/oc3`) |
+| `OC3_WEBSEARCH_PROVIDER` | `exa` or `parallel` for hosted search |
+| `OPENAI_API_KEY` | Expose native `openai/<model>` slugs |
+| `PARALLEL_API_KEY` | Parallel search auth (optional) |
 
 ## Development
 
-```bash
-bun test          # unit + server integration tests
-bun run typecheck # tsc --noEmit
+```shell
+bun install
+npm run check   # typecheck + tests
+npm run changeset   # user-visible changes need a changeset
 ```
 
-## Scope notes
+## Links
 
-- Codex requests are stateless (`store: false`); oc3 holds no conversation state.
-- Reasoning items and image inputs are not translated for Chat Completions models yet.
-- The Anthropic (`messages`) and Google endpoints are not bridged yet.
+- [Homepage](https://oc3.nbr.st) · [Releases](https://github.com/grikomsn/oc3/releases) · [Releasing](RELEASING.md)
+- Related: [opencodex](https://github.com/lidge-jun/opencodex) (heavier-weight), [ollama's codex proxy](https://github.com/ollama/ollama) (contract reference)
+
+## License
+
+[MIT](LICENSE) · Not affiliated with OpenAI or OpenCode
