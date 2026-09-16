@@ -1,4 +1,5 @@
 import { existsSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { oc3Home, ensureHome } from "./store";
 
@@ -64,7 +65,6 @@ export function serveLogPath(): string {
 }
 
 export function launchDetachedServe(cliEntry: string, port: number): number {
-  const { spawn } = require("node:child_process") as typeof import("node:child_process");
   const logFd = openSync(serveLogPath(), "a");
   const child = spawn(process.execPath, [cliEntry, "serve", "--port", String(port)], {
     detached: true,

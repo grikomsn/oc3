@@ -3,7 +3,7 @@ import type { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer, type ServerHandle } from "./server";
-import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
+import { applyCodexOverrides, overridesApplied, restoreCodexOverrides } from "./codex-config";
 import { codexCatalogPath } from "./store";
 import { loadState, saveState } from "./store";
 import type { Oc3Model } from "./models";

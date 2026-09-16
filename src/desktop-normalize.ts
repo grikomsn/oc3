@@ -2,7 +2,7 @@
 // ollama's internal/proxy/codex_desktop_normalize.go and _autoreview.go.
 
 import type { Oc3Model } from "./models";
-import { normalizeReasoningEffort, thinkingMetadataFor, type ThinkingMetadata } from "./routing-catalog";
+import { normalizeReasoningEffort, type ThinkingMetadata } from "./routing-catalog";
 import { reasoningWirePayload, thinkingFamily } from "./reasoning";
 
 export const AUTO_REVIEW_MODEL = "codex-auto-review";

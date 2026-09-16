@@ -85,7 +85,7 @@ describe("oc3 start/stop lifecycle", () => {
     expect(updated).toContain(`model_catalog_json = "${OC3_HOME_DIR}/codex-models.json"`);
     expect(existsSync(`${OC3_HOME_DIR}/codex-backup.json`)).toBe(true);
 
-    const stop = runCli(["stop"]);
+    runCli(["stop"]);
     await waitFor(async () => {
       try {
         await fetch(`http://127.0.0.1:${PORT}/health`);

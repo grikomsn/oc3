@@ -12,10 +12,11 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "compile": "bun build ./src/cli.ts --compile --minify --outfile ./dist/oc3",
-    "check": "bunx tsc --noEmit && bun test",
+    "check": "bunx tsc --noEmit && eslint . && bun test",
     "package": "bun build ./src/cli.ts --compile --minify --outfile ./dist/oc3",
     "changeset": "changeset",
-    "version": "changeset version"
+    "version": "changeset version",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@opentui/core": "^0.1.26"
@@ -27,7 +28,9 @@
     "@opentui/core-linux-arm64": "0.1.107",
     "@opentui/core-linux-x64": "0.1.107",
     "@types/bun": "^1.2.0",
-    "typescript": "^5.8.0"
+    "eslint": "^10.10.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.70.0"
   },
   "private": true,
   "workspaces": [

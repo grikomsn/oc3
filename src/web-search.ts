@@ -89,7 +89,6 @@ export async function executeWebSearch(query: string, sessionId: string): Promis
   }
   const contentType = response.headers.get("content-type") ?? "";
   const raw = await response.text();
-  let payload: unknown;
   if (contentType.includes("text/event-stream")) {
     let text = "";
     for (const line of raw.split("\n")) {
@@ -126,8 +125,4 @@ export async function executeWebSearch(query: string, sessionId: string): Promis
     }
     return undefined;
   }
-}
-
-function toolName(name: string | undefined): string {
-  return name ?? "web_search_exa";
 }

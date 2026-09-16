@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { existsSync, readFileSync } from "node:fs";
 import { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
@@ -6,9 +7,9 @@ import { startServer } from "./server";
 import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
 import { clearDaemonInfo, daemonRunning, launchDetachedServe, launchChatGptDesktop, readDaemonInfo, removeStaleDaemonFile, serveLogPath, stopDaemon, writeDaemonInfo } from "./daemon";
 import { codexCatalogPath } from "./store";
-import { existsSync, readFileSync } from "node:fs";
+
 import { DEFAULT_CONSOLE_SERVER } from "./protocol";
-import { ensureHome, loadSession, loadState, saveState } from "./store";
+import { ensureHome, loadState } from "./store";
 import { runTui } from "./tui";
 
 // Injected at build time by the release workflow (--define OC3_VERSION)

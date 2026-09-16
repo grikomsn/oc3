@@ -1,7 +1,7 @@
 import { OpenCodeAuth } from "./auth";
 import { availableModels } from "./console";
 import { findModel, type Oc3Model } from "./models";
-import { buildRequestHeaders, endpointUrl, newId, USER_AGENT } from "./protocol";
+import { buildRequestHeaders, endpointUrl, newId } from "./protocol";
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
 import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError, retryDelayMs } from "./retry";
 import { SseParser } from "./sse-parser";
@@ -354,8 +354,6 @@ async function handleBridgedEndpoint(
   });
 }
 
-const MAX_SEARCH_TURNS = 4;
-
 // Chat-completions models cannot execute Codex's hosted web_search tool.
 // Run an oc3-side loop: execute the search via Exa/Parallel MCP (mirroring
 // opencode's client), append results to input, and re-run until the model
@@ -409,7 +407,7 @@ async function runOneChatTurn(
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
   const chatRequest = responsesRequestToChat(body, model);
   let attempt = 0;
-  let currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
+  const currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
   while (true) {
     let upstream: Response;
     try {
