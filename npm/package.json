@@ -1,6 +1,6 @@
 {
   "name": "@nbrst/oc3",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "OpenCode Console proxy for OpenAI Codex and ChatGPT desktop",
   "license": "MIT",
   "repository": {
