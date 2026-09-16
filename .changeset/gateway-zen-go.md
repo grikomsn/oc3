@@ -12,3 +12,4 @@ Cover the full OpenCode provider set: Zen and Go gateway variants alongside Cons
 - Key UX: `oc3 keys` opens an interactive opencode-style menu (select + masked password input via @clack/prompts); the TUI gains an `a` panel for pasting the shared key.
 - Model metadata: display names prettified from raw ids, per-backend labels in the Codex picker descriptions, and stable group ordering (Console → Zen → Go → ChatGPT → OpenAI).
 - Native ChatGPT models are separated from the opencode variants: `chatgpt/<model>` slugs route to the ChatGPT backend with the client's own account session (`OC3_CHATGPT_MODELS` configures the list).
+- Backcompat cleanup: `oc3 snippet` and `oc3 catalog` commands removed (`start`/`models` cover them), `keys --zen`/`--go` flags collapsed into `--set`, legacy flat `models.json` no longer readable (run `oc3 models --refresh` once), and the user agent reports the real build version.

@@ -1,8 +1,13 @@
 export const DEFAULT_CONSOLE_SERVER = "https://opencode.ai/console";
 export const OPENCODE_CLIENT_ID = "opencode-cli";
 export const OPENCODE_CLIENT = "oc3";
-export const USER_AGENT = "oc3/0.1.0";
-export const OPENAI_API_BASE = "https://api.openai.com/v1";
+// Build-time version define (release workflow --define OC3_VERSION).
+declare const OC3_VERSION: string | undefined;
+
+export function userAgent(): string {
+  const version = typeof OC3_VERSION !== "undefined" ? OC3_VERSION : "dev";
+  return `oc3/${version}`;
+}
 export const NATIVE_CHATGPT_BASE = "https://chatgpt.com/backend-api/codex";
 export const NATIVE_OPENAI_BASE = "https://api.openai.com/v1";
 

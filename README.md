@@ -35,7 +35,7 @@ macOS (arm64/x64) and Linux (x64/arm64). Windows is not supported yet.
 | `oc3 login` | Device-code sign in to OpenCode Console |
 | `oc3 serve` | Proxy only, config untouched |
 | `oc3 keys` | Interactive key menu (opencode-style select + masked input) |
-| `oc3 keys --set KEY` | Store your OpenCode Zen/Go API key (also `--zen`/`--go`, `--clear`) |
+| `oc3 keys --set KEY` | Store your shared OpenCode Zen/Go API key (or `--clear`) |
 | `oc3 usage` | Show OpenCode Go subscription quota |
 
 First run: `oc3 login` (opens the browser, picks the org), then `oc3 start`. Codex

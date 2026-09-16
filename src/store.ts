@@ -48,7 +48,7 @@ export function saveSession(session: ConsoleSession): void {
 
 export function clearSession(): void {
   const path = sessionPath();
-  if (existsSync(path)) writeFileSync(path, "");
+  if (existsSync(path)) writeFileSync(path, "{}\n");
 }
 
 export function loadState<T extends object>(fallback: T): T {
@@ -66,21 +66,6 @@ export function saveState<T extends object>(state: T): void {
   writeFileSync(statePath(), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
-export function loadCachedModels<T>(): T[] {
-  const path = modelsPath();
-  if (!existsSync(path)) return [];
-  try {
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    return Array.isArray(value) ? value as T[] : [];
-  } catch {
-    return [];
-  }
-}
-
-export function saveCachedModels(models: unknown[]): void {
-  ensureHome();
-  writeFileSync(modelsPath(), `${JSON.stringify(models, null, 2)}\n`);
-}
 
 // --- OpenCode gateway (Zen / Go) API keys ---
 
@@ -115,13 +100,12 @@ export function saveKeys(keys: GatewayKeys): void {
 
 export function clearKeys(): void {
   const path = keysPath();
-  if (existsSync(path)) writeFileSync(path, "");
+  if (existsSync(path)) writeFileSync(path, "{}\n");
 }
 
 // --- Sectioned model catalog cache (v2) ---
-// models.json v2 keeps one array per backend: console (org-scoped /api/config),
+// models.json keeps one array per backend: console (org-scoped /api/config),
 // zen and go (public gateway catalogs), with per-section refresh timestamps.
-// The legacy flat array format is still readable and treated as console models.
 
 export interface CatalogCache {
   console: unknown[];
@@ -139,9 +123,6 @@ export function loadCatalogCache(): CatalogCache {
   if (!existsSync(path)) return emptyCatalogCache();
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (Array.isArray(value)) {
-      return { console: value, zen: [], go: [], updatedAt: {} };
-    }
     if (value && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).version === 2) {
       const record = value as Record<string, unknown>;
       return {

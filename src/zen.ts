@@ -11,8 +11,6 @@ import {
   type ProviderSource,
 } from "./models";
 
-export const ZEN_API_BASE_URL = "https://opencode.ai/zen/v1";
-export const GO_API_BASE_URL = "https://opencode.ai/zen/go/v1";
 export const GATEWAY_PROVIDER_IDS = { zen: "opencode", go: "opencode-go" } as const;
 export const GATEWAY_MODELS_CATALOG_URL = "https://models.opencode.ai/api.json";
 

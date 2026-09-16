@@ -13,21 +13,8 @@ const DEFAULT_REASONING_LEVELS = [
 
 const FALLBACK_BASE_INSTRUCTIONS = "You are a helpful coding agent. Complete the user's task using the provided tools.";
 
-export async function readDefaultBaseInstructions(): Promise<string> {
-  const path = `${process.env.HOME}/.codex/ollama-launch-models.json`;
-  try {
-    const file = Bun.file(path);
-    if (!(await file.exists())) return FALLBACK_BASE_INSTRUCTIONS;
-    const parsed = JSON.parse(await file.text()) as { models?: Array<{ base_instructions?: string }> };
-    const instructions = parsed.models?.[0]?.base_instructions;
-    return typeof instructions === "string" && instructions.trim() ? instructions : FALLBACK_BASE_INSTRUCTIONS;
-  } catch {
-    return FALLBACK_BASE_INSTRUCTIONS;
-  }
-}
-
 export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<void> {
-  const baseInstructions = await readDefaultBaseInstructions();
+  const baseInstructions = FALLBACK_BASE_INSTRUCTIONS;
   const catalog = {
     models: models.map((model, index) => ({
       additional_speed_tiers: [],

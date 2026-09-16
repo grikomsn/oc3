@@ -62,7 +62,7 @@ const upstream = Bun.serve({
 
 async function writeCatalog(): Promise<void> {
   mkdirSync(`${HOME}/.config/oc3`, { recursive: true });
-  writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify([
+  writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify({ version: 2, console: [
     {
       id: "acme/fast-model",
       rawModelId: "fast-model",
@@ -89,7 +89,7 @@ async function writeCatalog(): Promise<void> {
       endpoint: "responses",
       baseUrl: `http://127.0.0.1:${UPSTREAM_PORT}/v1`,
     },
-  ]));
+  ], zen: [], go: [] }));
 }
 
 const auth = new OpenCodeAuth();
@@ -171,7 +171,7 @@ describe("oc3 proxy server", () => {
 
   test("bridges messages-endpoint models through the Anthropic translator", async () => {
     mkdirSync(`${process.env.OC3_HOME}`, { recursive: true });
-    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify([
+    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify({ version: 2, console: [
       {
         id: "acme/claude-model",
         rawModelId: "claude-x",
@@ -185,7 +185,7 @@ describe("oc3 proxy server", () => {
         endpoint: "messages",
         baseUrl: `http://127.0.0.1:${UPSTREAM_PORT}/v1`,
       },
-    ]));
+    ], zen: [], go: [] }));
     const handle = await startServer({ port: PROXY_PORT + 2, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",
@@ -202,7 +202,7 @@ describe("oc3 proxy server", () => {
 describe("native OpenAI bridge", () => {
   test("routes openai/ models through the configured base URL", async () => {
     mkdirSync(`${HOME}/.config/oc3`, { recursive: true });
-    writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify([]));
+    writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
     process.env.OPENAI_API_KEY = "sk-test";
     process.env.OC3_OPENAI_BASE_URL = `http://127.0.0.1:${UPSTREAM_PORT}/v1`;
     try {
@@ -229,7 +229,7 @@ describe("native OpenAI bridge", () => {
 
   test("unknown models fall back to the native OpenAI backend with client auth", async () => {
     delete process.env.OPENAI_API_KEY;
-    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify([]));
+    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
     process.env.OC3_OPENAI_FALLBACK_URL = `http://127.0.0.1:${UPSTREAM_PORT}/v1`;
     try {
       const handle = await startServer({ port: PROXY_PORT + 7, auth });
@@ -248,7 +248,7 @@ describe("native OpenAI bridge", () => {
   });
 
   test("native fallback 404s when no credentials are available", async () => {
-    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify([]));
+    writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
     const handle = await startServer({ port: PROXY_PORT + 8, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",
@@ -261,7 +261,7 @@ describe("native OpenAI bridge", () => {
 
   test("openai/ models are unavailable without OPENAI_API_KEY", async () => {
     delete process.env.OPENAI_API_KEY;
-    writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify([]));
+    writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
     const handle = await startServer({ port: PROXY_PORT + 4, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",

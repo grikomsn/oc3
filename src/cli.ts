@@ -10,7 +10,7 @@ import { clearDaemonInfo, daemonRunning, launchDetachedServe, launchChatGptDeskt
 import { codexCatalogPath } from "./store";
 
 import { DEFAULT_CONSOLE_SERVER } from "./protocol";
-import { clearKeys, ensureHome, loadKeys, loadState, saveKeys } from "./store";
+import { clearKeys, ensureHome, loadKeys, saveKeys } from "./store";
 import { fetchGatewayUsage, gatewayKeyFor } from "./zen";
 import { runTui } from "./tui";
 
@@ -91,16 +91,10 @@ async function main(): Promise<void> {
         console.log("Stored OpenCode gateway keys cleared.");
         return;
       }
-      const zenFlag = typeof flags.zen === "string" ? flags.zen : undefined;
-      const goFlag = typeof flags.go === "string" ? flags.go : undefined;
       const setFlag = typeof flags.set === "string" ? flags.set : undefined;
-      if (zenFlag || goFlag || setFlag) {
-        const keys = loadKeys();
-        saveKeys({
-          ...(setFlag || zenFlag ? { zen: setFlag ?? zenFlag } : keys.zen ? { zen: keys.zen } : {}),
-          ...(goFlag ? { go: goFlag } : keys.go ? { go: keys.go } : {}),
-        });
-        console.log("OpenCode gateway keys saved to OC3_HOME/keys.json (0600).");
+      if (setFlag) {
+        saveKeys({ ...loadKeys(), zen: setFlag });
+        console.log("OpenCode gateway key saved to OC3_HOME/keys.json (0600).");
         return;
       }
       if (process.stdin.isTTY && process.stdout.isTTY) {
@@ -241,30 +235,6 @@ async function main(): Promise<void> {
       console.log(`config overrides: ${applied ? "applied" : "not applied"} (${codexConfigPath()})`);
       return;
     }
-    case "snippet": {
-      const state = loadState<{ defaultModel?: string }>({});
-      const selected = typeof flags.model === "string" && flags.model ? flags.model : state.defaultModel ?? "<model-id>";
-      const p = port(flags);
-      console.log(`# Add to ~/.codex/config.toml manually (oc3 never writes it for you):`);
-      console.log(`[profiles.oc3]`);
-      console.log(`model = "${selected}"`);
-      console.log(`model_provider = "oc3"`);
-      console.log("");
-      console.log(`[model_providers.oc3]`);
-      console.log(`name = "OpenCode Console (oc3)"`);
-      console.log(`base_url = "http://127.0.0.1:${p}/v1"`);
-      console.log(`wire_api = "responses"`);
-      console.log("");
-      console.log(`# Then run: codex --profile oc3`);
-      return;
-    }
-    case "catalog": {
-      const models = availableModels();
-      if (!models.length) { console.log("No cached models. Run: oc3 models --refresh"); process.exitCode = 1; return; }
-      await writeCodexCatalog(models);
-      console.log("Codex catalog regenerated.");
-      return;
-    }
     case "tui": {
       await runTui({ port: port(flags), auth });
       return;
@@ -365,7 +335,7 @@ Usage:
   oc3 whoami              Show signed-in account and organizations
   oc3 org [--org ID]      List or select the active organization
   oc3 models [--refresh]  List models and regenerate the Codex catalog
-  oc3 keys                Interactive key menu (or --set KEY / --zen KEY / --go KEY / --clear)
+  oc3 keys [--set KEY]    Interactive key menu; --set KEY stores the shared key (--clear wipes)
   oc3 usage               Show OpenCode Go subscription quota
   oc3 start [--port N]    Apply overrides, start detached proxy, boot ChatGPT desktop
                           (--no-launch skips booting ChatGPT desktop)
@@ -373,7 +343,6 @@ Usage:
   oc3 status              Show proxy and override state
   oc3 logs [--lines N]    Show recent proxy log lines (default 30)
   oc3 serve [--port N]    Run the proxy server without touching config.toml
-  oc3 catalog             Regenerate codex-models.json from cached models
   oc3 logout              Remove stored Console credentials
 
 Environment:

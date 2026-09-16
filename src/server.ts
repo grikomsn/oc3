@@ -1,7 +1,7 @@
 import { OpenCodeAuth } from "./auth";
 import { availableModels } from "./console";
 import { findModel, type Oc3Model } from "./models";
-import { buildRequestHeaders, endpointUrl, nativeChatGptBase, nativeOpenAiBase, newId } from "./protocol";
+import { buildRequestHeaders, endpointUrl, nativeChatGptBase, nativeOpenAiBase, newId, userAgent } from "./protocol";
 import { credentialErrorHint, credentialForModel } from "./credentials";
 import { gatewayChatTemplateArgs, gatewayResponsesExtras } from "./zen";
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
@@ -167,7 +167,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   body = normalizeReasoningForModel(body, model, thinking);
 
   const requestId = newId("req");
-  const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
+  const headers = buildRequestHeaders(model.endpoint, credential.token, userAgent(), requestId, sessionId, model.headers ?? {});
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
 
   if (model.endpoint === "responses") {
@@ -270,7 +270,7 @@ async function handleBridgedEndpoint(
   const credential = await credentialForModel(model, auth);
   if (!credential) return json({ error: { message: credentialErrorHint(model) } }, 401);
   const requestId = newId("req");
-  const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
+  const headers = buildRequestHeaders(model.endpoint, credential.token, userAgent(), requestId, sessionId, model.headers ?? {});
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
   const responseId = newId("resp");
 
@@ -409,7 +409,7 @@ async function runOneChatTurn(
   const credential = await credentialForModel(model, auth);
   if (!credential) return 401;
   const requestId = newId("req");
-  const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
+  const headers = buildRequestHeaders(model.endpoint, credential.token, userAgent(), requestId, sessionId, model.headers ?? {});
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
   const chatRequest = responsesRequestToChat(body, model);
   let attempt = 0;

@@ -4,6 +4,7 @@
 // mcp-websearch.ts) — oc3 mirrors that contract here.
 
 import type { Oc3Model } from "./models";
+import { userAgent } from "./protocol";
 
 export interface WebSearchResult {
   ok: boolean;
@@ -73,7 +74,7 @@ export async function executeWebSearch(query: string, sessionId: string): Promis
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
-    "User-Agent": "oc3/0.1.0",
+    "User-Agent": userAgent(),
   };
   if (provider === "parallel" && process.env.PARALLEL_API_KEY) {
     headers["Authorization"] = `Bearer ${process.env.PARALLEL_API_KEY}`;
