@@ -3,7 +3,7 @@ import * as clack from "@clack/prompts";
 import { existsSync, readFileSync } from "node:fs";
 import { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
-import type { Oc3Model } from "./models";
+import { displayName, type Oc3Model } from "./models";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer } from "./server";
 import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
@@ -161,7 +161,7 @@ async function main(): Promise<void> {
       console.log(`Found ${models.length} models. Codex catalog written.`);
       for (const model of models) {
         const cost = costLabel(model.cost);
-        console.log(`  ${model.id.padEnd(48)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}${cost}`);
+        console.log(`  ${model.id.padEnd(44)} ${backendTag(model).padEnd(9)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}${cost}`);
       }
       return;
     }
@@ -262,6 +262,11 @@ async function main(): Promise<void> {
 
 // Interactive key flow, styled after opencode's `opencode auth login`
 // (@clack/prompts select + masked password input).
+function backendTag(model: Oc3Model): string {
+  const match = /\[([^\]]+)\]$/.exec(displayName(model));
+  return match ? `[${match[1]}]` : "";
+}
+
 function costLabel(cost: Oc3Model["cost"]): string {
   if (!cost || (cost.input === undefined && cost.output === undefined)) return "";
   const input = cost.input !== undefined ? `$${trimNumber(cost.input)}` : "?";

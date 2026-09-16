@@ -83,9 +83,11 @@ thinking metadata.
 The Codex picker catalog is grouped and labeled by backend family, in this
 order: **OpenCode Console** → **OpenCode Zen** (`opencode/<model>`) →
 **OpenCode Go** (`opencode-go/<model>`) → **ChatGPT (native)**
-(`chatgpt/<model>`) → **OpenAI (native)** (`openai/<model>`). Each entry's
-description names its backend, and display names are prettified from raw ids
-("gpt-5.6-sol" → "GPT 5.6 Sol"). The native `chatgpt/*` slugs route to the
+(`chatgpt/<model>`) → **OpenAI (native)** (`openai/<model>`). Display names
+are prettified from raw ids ("gpt-5.6-sol" → "GPT 5.6 Sol") and carry a
+bracketed backend tag — "GPT 5.6 Sol [Zen]", "MiniMax M3 [Go]",
+"Claude Sonnet 5 [Console]" — which also works as an alias: `modelKey` strips
+it when routing, so `model [Zen]` resolves to the same model. The native `chatgpt/*` slugs route to the
 Codex ChatGPT backend with your own account session — disable them with
 `OC3_CHATGPT_MODELS=""` or trim the list.
 

@@ -253,6 +253,21 @@ export function sortModelsByGroup(models: readonly Oc3Model[]): Oc3Model[] {
   return [...models].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 }
 
+const GROUP_SHORT: Record<Exclude<ModelGroup, "other">, string> = {
+  console: "Console",
+  zen: "Zen",
+  go: "Go",
+  chatgpt: "ChatGPT",
+  openai: "OpenAI",
+};
+
+/** Display name with a bracketed backend tag; modelKey strips it on lookup. */
+export function displayName(model: Oc3Model): string {
+  const group = modelGroup(model);
+  const label = group === "other" ? model.providerId : GROUP_SHORT[group];
+  return `${model.name} [${label}]`;
+}
+
 /** Human label for a model's backend family. */
 export function providerLabel(model: Oc3Model): string {
   switch (modelGroup(model)) {
@@ -284,7 +299,8 @@ export function nativeChatGptModels(): Oc3Model[] {
 }
 
 export function modelKey(slug: string): string {
-  return slug.trim().toLowerCase().replace(/\[.*\]$/, "");
+  // Bracketed backend tags ("model [Zen]") are display aliases, stripped here.
+  return slug.trim().toLowerCase().replace(/\[.*\]$/, "").trim();
 }
 
 export function findModel(models: readonly Oc3Model[], requested: string): Oc3Model | undefined {

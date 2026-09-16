@@ -7,7 +7,7 @@ import { applyCodexOverrides, overridesApplied, restoreCodexOverrides } from "./
 import { codexCatalogPath, loadKeys, saveKeys } from "./store";
 import { gatewayKeyFor } from "./zen";
 import { loadState, saveState } from "./store";
-import type { Oc3Model } from "./models";
+import { displayName, type Oc3Model } from "./models";
 
 interface TuiOptions {
   port: number;
@@ -86,7 +86,8 @@ export async function runTui(options: TuiOptions): Promise<void> {
       }
       const marker = model.id === state.defaultModel ? "*" : index + start === selected ? ">" : " ";
       const cost = model.cost?.input !== undefined ? ` $${trimNumber(model.cost.input)}` : "";
-      line.content = `${marker} ${model.id.padEnd(44)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}${cost}`.padEnd(PAD);
+      const tag = /\[([^\]]+)\]$/.exec(displayName(model))?.[1] ?? "";
+      line.content = `${marker} ${model.id.padEnd(40)} ${tag.padEnd(8)} ${model.endpoint.padEnd(16)} ctx=${model.contextLength}${cost}`.padEnd(PAD);
       line.fg = index + start === selected ? "#FFFFFF" : model.id === state.defaultModel ? "#9BE494" : "#888899";
       line.bg = index + start === selected ? "#22304a" : undefined;
     });

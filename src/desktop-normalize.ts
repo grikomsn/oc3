@@ -9,7 +9,8 @@ export const AUTO_REVIEW_MODEL = "codex-auto-review";
 export const GUARDIAN_TOOL_NAME = "submit_guardian_decision";
 
 export function modelKey(slug: string): string {
-  return slug.trim().toLowerCase().replace(/\[.*\]$/, "");
+  // Bracketed backend tags ("model [Zen]") are display aliases, stripped here.
+  return slug.trim().toLowerCase().replace(/\[.*\]$/, "").trim();
 }
 
 // --- Full-Access exec tool normalization ---

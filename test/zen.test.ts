@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, write
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
 import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection } from "../src/store";
-import { modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, reasoningEffortsFromSource, type ProviderSource } from "../src/models";
+import { displayName, findModel, modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, reasoningEffortsFromSource, type ProviderSource } from "../src/models";
 import { writeCodexCatalog } from "../src/codex-catalog";
 import { credentialForModel, credentialErrorHint } from "../src/credentials";
 import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayResponsesExtras } from "../src/zen";
@@ -214,9 +214,10 @@ describe("gateway catalog parsing", () => {
     const zen = modelsFromGatewayProvider("opencode", zenCatalogProvider, "zen");
     await writeCodexCatalog(zen);
     const codex = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-models.json`, "utf8")) as {
-      models: Array<{ slug: string; supported_reasoning_levels: Array<{ effort: string }>; default_reasoning_level: string }>;
+      models: Array<{ slug: string; display_name: string; supported_reasoning_levels: Array<{ effort: string }>; default_reasoning_level: string }>;
     };
     const gptEntry = codex.models.find((model) => model.slug === "opencode/gpt-model")!;
+    expect(gptEntry.display_name).toBe("GPT via Zen [Zen]");
     expect(gptEntry.supported_reasoning_levels.map((level) => level.effort)).toEqual(["low", "high"]);
     expect(gptEntry.default_reasoning_level).toBe("low");
     const routing = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-routing.json`, "utf8")) as {
@@ -377,6 +378,15 @@ describe("model metadata", () => {
     expect(prettifyModelName("glm-5.3-flash")).toBe("GLM 5.3 Flash");
     expect(prettifyModelName("kimi-k2-thinking")).toBe("Kimi K2 Thinking");
     expect(prettifyModelName("qwen3.5-plus")).toBe("Qwen3.5 Plus");
+  });
+
+  test("display names carry bracketed backend tags that routing strips", () => {
+    expect(displayName(gatewayModel({}))).toBe("GPT via Zen [Zen]");
+    expect(displayName(gatewayModel({ providerId: "opencode-go", source: "gateway" }))).toBe("GPT via Zen [Go]");
+    expect(displayName(gatewayModel({ source: "console" }))).toBe("GPT via Zen [Console]");
+    expect(displayName(gatewayModel({ providerId: "chatgpt", name: "GPT 6 Astra" }))).toBe("GPT 6 Astra [ChatGPT]");
+    const found = findModel([gatewayModel({ id: "acme/gpt-model", rawModelId: "gpt-model", providerId: "acme", name: "GPT 5.6 Sol" })], "acme/gpt-model [Zen]");
+    expect(found?.id).toBe("acme/gpt-model");
   });
 
   test("providerLabel distinguishes every backend family", () => {
