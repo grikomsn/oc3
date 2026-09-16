@@ -1,5 +1,6 @@
 import { modelsFromConsoleConfig, nativeOpenAiModels, type Oc3Model } from "./models";
-import { loadCachedModels, saveCachedModels } from "./store";
+import { loadCatalogCache, saveCatalogSection } from "./store";
+import { fetchGatewayModels } from "./zen";
 import type { OpenCodeAuth } from "./auth";
 
 export async function loadConsoleModels(auth: OpenCodeAuth): Promise<Oc3Model[]> {
@@ -14,18 +15,49 @@ export async function loadConsoleModels(auth: OpenCodeAuth): Promise<Oc3Model[]>
   const payload = await response.json() as unknown;
   const models = modelsFromConsoleConfig(payload);
   if (!models.length) throw new Error("OpenCode Console returned no usable models");
-  saveCachedModels(models);
+  saveCatalogSection("console", models);
   return models;
 }
 
 export function availableModels(): Oc3Model[] {
-  const cached = loadCachedModels<Oc3Model>();
+  const cache = loadCatalogCache();
   const openAi = process.env.OPENAI_API_KEY ? nativeOpenAiModels() : [];
-  return [...cached, ...openAi];
+  return [
+    ...cache.console as Oc3Model[],
+    ...cache.zen as Oc3Model[],
+    ...cache.go as Oc3Model[],
+    ...openAi,
+  ];
 }
 
 export async function refreshModels(auth: OpenCodeAuth): Promise<Oc3Model[]> {
-  const consoleModels = await loadConsoleModels(auth);
-  const openAi = process.env.OPENAI_API_KEY ? nativeOpenAiModels() : [];
-  return [...consoleModels, ...openAi];
+  const errors: string[] = [];
+  let consoleModels: Oc3Model[] = [];
+  if (auth.isSignedIn()) {
+    try {
+      consoleModels = await loadConsoleModels(auth);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  const refreshed = await refreshGatewayCatalogs();
+  errors.push(...refreshed.errors);
+  const merged = [
+    ...consoleModels,
+    ...refreshed.zen,
+    ...refreshed.go,
+    ...(process.env.OPENAI_API_KEY ? nativeOpenAiModels() : []),
+  ];
+  if (!merged.length && errors.length) throw new Error(errors[0]);
+  return merged;
+}
+
+export async function refreshGatewayCatalogs(): Promise<{ zen: Oc3Model[]; go: Oc3Model[]; errors: string[] }> {
+  const errors: string[] = [];
+  const [zen, go] = await Promise.all([fetchGatewayModels("zen"), fetchGatewayModels("go")]);
+  if (zen) saveCatalogSection("zen", zen);
+  else errors.push("Zen catalog unreachable; keeping cached models");
+  if (go) saveCatalogSection("go", go);
+  else errors.push("Go catalog unreachable; keeping cached models");
+  return { zen: zen ?? [], go: go ?? [], errors };
 }

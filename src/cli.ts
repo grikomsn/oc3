@@ -9,7 +9,8 @@ import { clearDaemonInfo, daemonRunning, launchDetachedServe, launchChatGptDeskt
 import { codexCatalogPath } from "./store";
 
 import { DEFAULT_CONSOLE_SERVER } from "./protocol";
-import { ensureHome, loadState } from "./store";
+import { clearKeys, ensureHome, loadKeys, loadState, saveKeys } from "./store";
+import { fetchGatewayUsage, gatewayKeyFor } from "./zen";
 import { runTui } from "./tui";
 
 // Injected at build time by the release workflow (--define OC3_VERSION)
@@ -83,6 +84,51 @@ async function main(): Promise<void> {
       console.log("Signed out.");
       return;
     }
+    case "keys": {
+      if (flags.clear) {
+        clearKeys();
+        console.log("Stored OpenCode gateway keys cleared.");
+        return;
+      }
+      const zenFlag = typeof flags.zen === "string" ? flags.zen : undefined;
+      const goFlag = typeof flags.go === "string" ? flags.go : undefined;
+      const setFlag = typeof flags.set === "string" ? flags.set : undefined;
+      if (zenFlag || goFlag || setFlag) {
+        const keys = loadKeys();
+        saveKeys({
+          ...(setFlag || zenFlag ? { zen: setFlag ?? zenFlag } : keys.zen ? { zen: keys.zen } : {}),
+          ...(goFlag ? { go: goFlag } : keys.go ? { go: keys.go } : {}),
+        });
+        console.log("OpenCode gateway keys saved to OC3_HOME/keys.json (0600).");
+        return;
+      }
+      const keys = loadKeys();
+      const env = process.env.OPENCODE_API_KEY ? "OPENCODE_API_KEY" : undefined;
+      const zen = keys.zen ?? keys.go ?? env;
+      const go = keys.go ?? keys.zen ?? env;
+      const show = (value: string | undefined) => value ? `set (${value.slice(0, 4)}…${value.slice(-4)})` : "not set";
+      console.log(`zen: ${show(zen)}`);
+      console.log(`go:  ${show(go)}`);
+      if (!zen) console.log("Configure with: oc3 keys --set <zen-api-key>  (from https://opencode.ai/auth)");
+      return;
+    }
+    case "usage": {
+      const keys = loadKeys();
+      const key = gatewayKeyFor("opencode-go", keys);
+      if (!key) {
+        console.log("No OpenCode Go key configured. Run: oc3 keys --set <zen-api-key>");
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        const usage = await fetchGatewayUsage(key);
+        console.log(JSON.stringify(usage, null, 2));
+      } catch (error) {
+        console.error(`Usage lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
     case "whoami": {
       const session = auth.getSession();
       if (!session) { console.log("Not signed in."); process.exitCode = 1; return; }
@@ -104,7 +150,7 @@ async function main(): Promise<void> {
     case "models": {
       const models = flags.refresh ? await refreshModels(auth) : availableModels();
       if (!models.length) {
-        console.log("No models cached. Run: oc3 models --refresh (requires sign-in)");
+        console.log("No models cached. Run: oc3 models --refresh (Console sign-in optional; Zen/Go catalogs are public)");
         process.exitCode = 1;
         return;
       }
@@ -278,6 +324,8 @@ Usage:
   oc3 whoami              Show signed-in account and organizations
   oc3 org [--org ID]      List or select the active organization
   oc3 models [--refresh]  List models and regenerate the Codex catalog
+  oc3 keys [--set KEY]    Store the OpenCode Zen/Go API key (or --zen/--go; --clear to wipe)
+  oc3 usage               Show OpenCode Go subscription quota
   oc3 start [--port N]    Apply overrides, start detached proxy, boot ChatGPT desktop
                           (--no-launch skips booting ChatGPT desktop)
   oc3 stop                Restore previous config values and stop the proxy
@@ -291,6 +339,7 @@ Environment:
   OC3_HOME            State directory (default ~/.config/oc3)
   OPENAI_API_KEY      Enables bridging native OpenAI models (openai/<model> slugs)
   OC3_OPENAI_MODELS   Comma-separated OpenAI model ids to expose
+  OPENCODE_API_KEY    OpenCode Zen/Go gateway API key (alternative to oc3 keys)
 `;
 
 await main();

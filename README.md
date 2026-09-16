@@ -1,6 +1,6 @@
 # oc3
 
-Run [OpenCode Console](https://opencode.ai/console) models in OpenAI Codex and ChatGPT desktop — one local proxy, any Console model.
+Run [OpenCode Console](https://opencode.ai/console), Zen, and Go models in OpenAI Codex and ChatGPT desktop — one local proxy, every OpenCode provider variant.
 
 ```shell
 npx @nbrst/oc3
@@ -34,10 +34,29 @@ macOS (arm64/x64) and Linux (x64/arm64). Windows is not supported yet.
 | `oc3 stop` | Restore your previous config and stop the proxy |
 | `oc3 login` | Device-code sign in to OpenCode Console |
 | `oc3 serve` | Proxy only, config untouched |
+| `oc3 keys --set KEY` | Store your OpenCode Zen/Go API key (also `--zen`/`--go`, `--clear`) |
+| `oc3 usage` | Show OpenCode Go subscription quota |
 
 First run: `oc3 login` (opens the browser, picks the org), then `oc3 start`. Codex
 and ChatGPT desktop are pointed at `http://127.0.0.1:8788` via the `[profiles.oc3]`
 block — `oc3 start` writes it, `oc3 stop` removes it.
+
+## Zen and Go (no Console sign-in needed)
+
+The gateway variants work with a plain API key from [opencode.ai/auth](https://opencode.ai/auth):
+
+```shell
+oc3 keys --set <zen-api-key>   # or set OPENCODE_API_KEY
+oc3 models --refresh           # Zen/Go catalogs are public; Console sign-in optional
+oc3 start
+```
+
+Zen (`opencode/<model>`) is pay-as-you-go, Go (`opencode-go/<model>`) is the
+subscription tier. Free/anonymous models work without any key. oc3 refreshes
+both catalogs from the gateway's public `/models` endpoints, enriches them from
+the models.dev snapshot, and translates Codex's Responses traffic into each
+model's dialect (responses, chat-completions, Anthropic messages, Gemini) with
+session-keyed prompt caching and encrypted-reasoning passthrough.
 
 ## How routing works
 
@@ -61,6 +80,7 @@ thinking metadata.
 | `OC3_HOME` | State directory (default `~/.config/oc3`) |
 | `OC3_WEBSEARCH_PROVIDER` | `exa` or `parallel` for hosted search |
 | `OPENAI_API_KEY` | Expose native `openai/<model>` slugs |
+| `OPENCODE_API_KEY` | OpenCode Zen/Go gateway key (alternative to `oc3 keys`) |
 | `PARALLEL_API_KEY` | Parallel search auth (optional) |
 
 ## Development

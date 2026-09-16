@@ -2,6 +2,8 @@ import { OpenCodeAuth } from "./auth";
 import { availableModels } from "./console";
 import { findModel, type Oc3Model } from "./models";
 import { buildRequestHeaders, endpointUrl, newId } from "./protocol";
+import { credentialErrorHint, credentialForModel } from "./credentials";
+import { gatewayChatTemplateArgs, gatewayResponsesExtras } from "./zen";
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
 import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError, retryDelayMs } from "./retry";
 import { SseParser } from "./sse-parser";
@@ -142,13 +144,9 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
     return json({ error: { message: "oc3 only proxies streaming requests (stream: true)" } }, 400);
   }
 
-  const credential = model.providerId === "openai"
-    ? { token: process.env.OPENAI_API_KEY ?? "", server: "", orgId: undefined, orgName: undefined }
-    : process.env.OC3_TEST_TOKEN
-      ? { token: process.env.OC3_TEST_TOKEN, server: "", orgId: undefined, orgName: undefined }
-      : await auth.getCredential();
-  if (!credential.token) {
-    return json({ error: { message: "No credentials for this model provider" } }, 401);
+  const credential = await credentialForModel(model, auth);
+  if (!credential) {
+    return json({ error: { message: credentialErrorHint(model) } }, 401);
   }
 
   const desktopNormalized = normalizeInputItems(body);
@@ -164,7 +162,8 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
 
   if (model.endpoint === "responses") {
-    const upstreamBody = JSON.stringify({ ...body, ...withoutCredentialOptions(model.body), model: model.rawModelId, stream: true, store: false });
+    const gatewayExtras = model.providerId.startsWith("opencode") ? gatewayResponsesExtras(body, sessionId) : {};
+    const upstreamBody = JSON.stringify({ ...body, ...withoutCredentialOptions(model.body), ...gatewayExtras, model: model.rawModelId, stream: true, store: false });
     let upstream: Response;
     let responsesAttempt = 0;
     while (true) {
@@ -196,6 +195,8 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   }
 
   body = applyReasoningWire(body, model);
+  const templateArgs = gatewayChatTemplateArgs(model);
+  if (templateArgs) body = { ...body, ...templateArgs };
   if (searchBridgeNeeded(body, model)) {
     return await runSearchBridgeLoop(request, body, model, auth, sessionId);
   }
@@ -257,10 +258,8 @@ async function handleBridgedEndpoint(
   auth: OpenCodeAuth,
   sessionId: string,
 ): Promise<Response> {
-  const credential = process.env.OC3_TEST_TOKEN
-    ? { token: process.env.OC3_TEST_TOKEN, server: "", orgId: undefined, orgName: undefined }
-    : await auth.getCredential();
-  if (!credential.token) return json({ error: { message: "Not signed in. Run: oc3 login" } }, 401);
+  const credential = await credentialForModel(model, auth);
+  if (!credential) return json({ error: { message: credentialErrorHint(model) } }, 401);
   const requestId = newId("req");
   const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
@@ -398,10 +397,8 @@ async function runOneChatTurn(
   auth: OpenCodeAuth,
   sessionId: string,
 ): Promise<{ output: Array<Record<string, unknown>>; finishReason: string | undefined; usage: Record<string, unknown> | undefined } | number> {
-  const credential = process.env.OC3_TEST_TOKEN
-    ? { token: process.env.OC3_TEST_TOKEN, server: "", orgId: undefined, orgName: undefined }
-    : await auth.getCredential();
-  if (!credential.token) return 401;
+  const credential = await credentialForModel(model, auth);
+  if (!credential) return 401;
   const requestId = newId("req");
   const headers = buildRequestHeaders(model.endpoint, credential.token, "oc3/0.1.0", requestId, sessionId, model.headers ?? {});
   if (credential.orgId) headers["x-org-id"] = credential.orgId;

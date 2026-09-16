@@ -4,7 +4,8 @@ import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer, type ServerHandle } from "./server";
 import { applyCodexOverrides, overridesApplied, restoreCodexOverrides } from "./codex-config";
-import { codexCatalogPath } from "./store";
+import { codexCatalogPath, loadKeys } from "./store";
+import { gatewayKeyFor } from "./zen";
 import { loadState, saveState } from "./store";
 import type { Oc3Model } from "./models";
 
@@ -36,6 +37,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   const pad = (value: string): string => value.padEnd(PAD);
   const account = new TextRenderable(renderer, { content: "", fg: "#9BE49B" });
   const serverStatus = new TextRenderable(renderer, { content: "", fg: "#F0C674" });
+  const gatewayStatus = new TextRenderable(renderer, { content: "", fg: "#F0C674" });
   const listTitle = new TextRenderable(renderer, { content: "Models:", fg: "#C5C8D6" });
   const listBox = new BoxRenderable(renderer, { flexDirection: "column", height: 12, backgroundColor: "#101014" });
   const listLines: TextRenderable[] = [];
@@ -50,6 +52,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   root.add(header);
   root.add(account);
   root.add(serverStatus);
+  root.add(gatewayStatus);
   root.add(listTitle);
   root.add(listBox);
   root.add(status);
@@ -86,6 +89,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
     account.content = pad(session ? `account: ${session.email}  org: ${session.orgName ?? session.orgId ?? "none"}` : "not signed in — exit and run: oc3 login");
     const applied = overridesApplied({ model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${options.port}/v1` });
     serverStatus.content = pad(`${handle ? `server: http://127.0.0.1:${handle.port}  requests: ${handle.requestCount()}` : "server: stopped"}  config: ${applied ? "overridden" : "original"}`);
+    const keys = loadKeys();
+    const show = (value: string) => value ? "set" : "not set";
+    gatewayStatus.content = pad(`gateway keys:  zen: ${show(gatewayKeyFor("opencode", keys))}  go: ${show(gatewayKeyFor("opencode-go", keys))}  (oc3 keys --set <key>)`);
     status.content = pad(statusLine);
   }
 
