@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import * as clack from "@clack/prompts";
 import { existsSync, readFileSync } from "node:fs";
 import { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
@@ -96,10 +95,6 @@ async function main(): Promise<void> {
       if (setFlag) {
         saveKeys({ ...loadKeys(), zen: setFlag });
         console.log("OpenCode gateway key saved to OC3_HOME/keys.json (0600).");
-        return;
-      }
-      if (process.stdin.isTTY && process.stdout.isTTY) {
-        await interactiveKeys();
         return;
       }
       const keys = loadKeys();
@@ -260,8 +255,6 @@ async function main(): Promise<void> {
   }
 }
 
-// Interactive key flow, styled after opencode's `opencode auth login`
-// (@clack/prompts select + masked password input).
 function backendTag(model: Oc3Model): string {
   const match = /\[([^\]]+)\]$/.exec(displayName(model));
   return match ? `[${match[1]}]` : "";
@@ -276,35 +269,6 @@ function costLabel(cost: Oc3Model["cost"]): string {
 
 function trimNumber(value: number): string {
   return Number(value.toFixed(2)).toString();
-}
-
-async function interactiveKeys(): Promise<void> {
-  clack.intro("OpenCode gateway keys");
-  const action = await clack.select({
-    message: "What do you want to do?",
-    options: [
-      { value: "shared", label: "Set shared key", hint: "one Zen key authorizes Zen and Go" },
-      { value: "zen", label: "Set Zen key only" },
-      { value: "go", label: "Set Go key only" },
-      { value: "clear", label: "Clear stored keys" },
-    ],
-  });
-  if (clack.isCancel(action)) { clack.cancel("Canceled."); return; }
-  if (action === "clear") {
-    clearKeys();
-    clack.outro("Stored keys cleared.");
-    return;
-  }
-  const key = await clack.password({
-    message: "Paste API key (create one at https://opencode.ai/auth)",
-    validate: (value) => (value && value.trim() ? undefined : "Required"),
-  });
-  if (clack.isCancel(key) || !key) { clack.cancel("Canceled."); return; }
-  const next = loadKeys();
-  if (action === "go") next.go = key.trim();
-  else next.zen = key.trim();
-  saveKeys(next);
-  clack.outro(`Saved to OC3_HOME/keys.json (0600). Status: oc3 keys`);
 }
 
 async function promptOrgChoice(count: number): Promise<number | undefined> {
@@ -348,12 +312,13 @@ function loadSessionSafe() {
 const USAGE = `oc3 — OpenCode Console proxy for Codex / ChatGPT desktop
 
 Usage:
-  oc3                     Open the TUI dashboard (proxy + model picker)
+  oc3                     Open the TUI dashboard
+                          (1 Models · 2 Account · 3 Gateway · 4 Proxy · 5 Logs)
   oc3 login [--org ID]    Device-code sign in to OpenCode Console
   oc3 whoami              Show signed-in account and organizations
   oc3 org [--org ID]      List or select the active organization
   oc3 models [--refresh]  List models and regenerate the Codex catalog
-  oc3 keys [--set KEY]    Interactive key menu; --set KEY stores the shared key (--clear wipes)
+  oc3 keys [--set KEY]    Store the shared gateway key (--clear wipes; TUI Gateway view for interactive use)
   oc3 usage               Show OpenCode Go subscription quota
   oc3 start [--port N]    Apply overrides, start detached proxy, boot ChatGPT desktop
                           (--no-launch skips booting ChatGPT desktop)

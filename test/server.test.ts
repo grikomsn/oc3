@@ -166,6 +166,11 @@ describe("oc3 proxy server", () => {
     expect(sent.url).toBe(`http://127.0.0.1:${UPSTREAM_PORT}/v1/responses`);
     expect(sent.body.model).toBe("gpt-model");
     expect(sent.body.store).toBe(false);
+    const records = handle.recentRequests();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.model).toBe("acme/gpt-model");
+    expect(records[0]!.status).toBe(200);
+    expect(records[0]!.ms).toBeGreaterThanOrEqual(0);
     handle.stop();
   });
 

@@ -28,15 +28,29 @@ function zeroUsage(): Record<string, unknown> {
 import { anthropicRequestFromResponses, AnthropicStreamToResponses } from "./anthropic-bridge";
 import { googleRequestFromResponses, GoogleStreamToResponses } from "./google-bridge";
 
+/** One settled /responses request, kept in a bounded ring for the TUI. */
+export interface RequestRecord {
+  /** Epoch ms when the request arrived. */
+  at: number;
+  /** Requested model slug (resolved oc3 model id when known). */
+  model: string;
+  /** HTTP status returned to the client. */
+  status: number;
+  /** Handler wall time in ms. */
+  ms: number;
+}
+
 export interface ServerHandle {
   port: number;
   stop(): void;
   requestCount(): number;
+  recentRequests(): RequestRecord[];
 }
 
 export function startServer(options: { port: number; auth: OpenCodeAuth }): Promise<ServerHandle> {
   const auth = options.auth;
   let requests = 0;
+  const recentRequests: RequestRecord[] = [];
   const sessionId = newId("sess");
   const turnModels = new TurnModelCache();
   const server = Bun.serve({
@@ -64,7 +78,10 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
         const responsesMatch = request.method === "POST" && (path === "/responses" || path === "/v1/responses" || path === "/backend-api/codex/responses");
         if (responsesMatch) {
           requests += 1;
-          return await handleResponses(request, auth, sessionId, turnModels);
+          return await handleResponses(request, auth, sessionId, turnModels, (record) => {
+            recentRequests.push(record);
+            if (recentRequests.length > 50) recentRequests.shift();
+          });
         }
         return json({ error: { message: `Not found: ${request.method} ${path}` } }, 404);
       } catch (error) {
@@ -78,6 +95,7 @@ export function startServer(options: { port: number; auth: OpenCodeAuth }): Prom
     port: listenPort,
     stop: () => server.stop(true),
     requestCount: () => requests,
+    recentRequests: () => [...recentRequests],
   });
 }
 
@@ -106,7 +124,29 @@ async function parseRequestBody(request: Request): Promise<Record<string, unknow
   return JSON.parse(new TextDecoder().decode(decoded)) as Record<string, unknown>;
 }
 
-async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: string, turnModels: TurnModelCache): Promise<Response> {
+async function handleResponses(
+  request: Request,
+  auth: OpenCodeAuth,
+  sessionId: string,
+  turnModels: TurnModelCache,
+  record?: (entry: RequestRecord) => void,
+): Promise<Response> {
+  const startedAt = Date.now();
+  let slug = "";
+  const response = await handleResponsesInner(request, auth, sessionId, turnModels, (model) => {
+    slug = model;
+  });
+  record?.({ at: startedAt, model: slug, status: response.status, ms: Date.now() - startedAt });
+  return response;
+}
+
+async function handleResponsesInner(
+  request: Request,
+  auth: OpenCodeAuth,
+  sessionId: string,
+  turnModels: TurnModelCache,
+  setSlug: (model: string) => void,
+): Promise<Response> {
   let body: Record<string, unknown>;
   try {
     body = await parseRequestBody(request);
@@ -115,6 +155,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
     return json({ error: { message } }, 400);
   }
   const requestedModel = typeof body.model === "string" ? body.model : "";
+  setSlug(requestedModel);
   const models = availableModels();
   let model = findModel(models, requestedModel);
   if (!model) {
@@ -137,6 +178,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
       },
     }, 404);
   }
+  setSlug(model.id);
   if (model.providerId === "chatgpt") {
     // Native ChatGPT models use the client's own Codex account session.
     const chatGptAuth = request.headers.get("chatgpt-account-id");
@@ -666,4 +708,3 @@ function json(payload: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
-

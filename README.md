@@ -29,12 +29,11 @@ macOS (arm64/x64) and Linux (x64/arm64). Windows is not supported yet.
 
 | Command | What it does |
 |---|---|
-| `oc3` | TUI: pick a model, toggle server + config override, quit |
+| `oc3` | TUI: Models · Account · Gateway · Proxy · Logs views |
 | `oc3 start` | Apply overrides, start a detached proxy, boot ChatGPT desktop |
 | `oc3 stop` | Restore your previous config and stop the proxy |
 | `oc3 login` | Device-code sign in to OpenCode Console |
 | `oc3 serve` | Proxy only, config untouched |
-| `oc3 keys` | Interactive key menu (opencode-style select + masked input) |
 | `oc3 keys --set KEY` | Store your shared OpenCode Zen/Go API key (or `--clear`) |
 | `oc3 usage` | Show OpenCode Go subscription quota |
 
@@ -54,7 +53,7 @@ oc3 start
 
 | Command | What it does |
 |---|---|
-| `oc3 keys` (in the TUI: `a`) | Pick what to set, paste the key — masked, like `opencode auth login` |
+| TUI → Gateway (`3`) | Set/clear Zen and Go keys, check Go quota — no shell roundtrip |
 
 Zen (`opencode/<model>`) is pay-as-you-go, Go (`opencode-go/<model>`) is the
 subscription tier. Free/anonymous models work without any key. oc3 refreshes
