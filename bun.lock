@@ -5,6 +5,7 @@
     "": {
       "name": "oc3",
       "dependencies": {
+        "@clack/prompts": "^1.8.1",
         "@opentui/core": "^0.1.26",
       },
       "devDependencies": {

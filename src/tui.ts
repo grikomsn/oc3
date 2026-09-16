@@ -1,10 +1,10 @@
-import { BoxRenderable, TextRenderable, createCliRenderer } from "@opentui/core";
+import { BoxRenderable, InputRenderable, InputRenderableEvents, TextRenderable, createCliRenderer } from "@opentui/core";
 import type { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer, type ServerHandle } from "./server";
 import { applyCodexOverrides, overridesApplied, restoreCodexOverrides } from "./codex-config";
-import { codexCatalogPath, loadKeys } from "./store";
+import { codexCatalogPath, loadKeys, saveKeys } from "./store";
 import { gatewayKeyFor } from "./zen";
 import { loadState, saveState } from "./store";
 import type { Oc3Model } from "./models";
@@ -46,9 +46,17 @@ export async function runTui(options: TuiOptions): Promise<void> {
     listLines.push(line);
     listBox.add(line);
   }
-  const footer = new TextRenderable(renderer, { content: "s: toggle server  e: toggle config overrides  r: refresh models  q: quit".padEnd(100), fg: "#707880" });
+  const footer = new TextRenderable(renderer, { content: "s: toggle server  e: toggle config overrides  r: refresh models  a: api keys  q: quit".padEnd(100), fg: "#707880" });
   const status = new TextRenderable(renderer, { content: "", fg: "#9BE494" });
-
+  const keysPanel = new BoxRenderable(renderer, { flexDirection: "column", height: 4, backgroundColor: "#161620", width: "100%" });
+  keysPanel.visible = false;
+  const keysInput = new InputRenderable(renderer, {
+    placeholder: "Paste OpenCode API key (shared Zen/Go) — Enter saves, Esc closes…",
+    maxLength: 200,
+    width: "100%",
+  });
+  keysPanel.add(keysInput);
+  root.add(keysPanel);
   root.add(header);
   root.add(account);
   root.add(serverStatus);
@@ -83,6 +91,32 @@ export async function runTui(options: TuiOptions): Promise<void> {
     }
     listTitle.content = `Models ${total ? `${selected + 1}/${total}` : "(0)"} — up/down move, Enter sets default, r refreshes:`.padEnd(PAD);
   }
+
+  let keysPanelOpen = false;
+
+  function openKeysPanel(): void {
+    keysPanelOpen = true;
+    keysPanel.visible = true;
+    keysInput.value = "";
+    keysInput.focus();
+    refreshStatus();
+  }
+
+  function closeKeysPanel(): void {
+    keysPanelOpen = false;
+    keysPanel.visible = false;
+    refreshStatus();
+  }
+
+  keysInput.on(InputRenderableEvents.ENTER, (value: string) => {
+    const key = value.trim();
+    if (key) {
+      const current = loadKeys();
+      saveKeys({ ...current, zen: key });
+      statusLine = "Gateway key saved (shared Zen/Go). Go-only keys: oc3 keys --go <key>.";
+    }
+    closeKeysPanel();
+  });
 
   function refreshStatus(): void {
     const session = options.auth.getSession();
@@ -152,6 +186,10 @@ export async function runTui(options: TuiOptions): Promise<void> {
   }
 
   renderer.keyInput.on("keypress", (key) => {
+    if (keysPanelOpen) {
+      if (key.name === "escape") closeKeysPanel();
+      return;
+    }
     if (key.name === "q" || key.name === "escape") {
       handle?.stop();
       renderer.destroy();
@@ -167,6 +205,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       renderList();
       return;
     }
+    if (key.name === "a") { openKeysPanel(); return; }
     if (key.name === "g") { selected = 0; renderList(); return; }
     if (key.name === "G") { selected = Math.max(models.length - 1, 0); renderList(); return; }
     if (key.name === "return" || key.name === "enter") {

@@ -1,4 +1,4 @@
-import { OPENAI_API_BASE, resolveEndpointKind, type EndpointKind, type OpenCodeMode } from "./protocol";
+import { nativeChatGptBase, nativeOpenAiBase, resolveEndpointKind, type EndpointKind, type OpenCodeMode } from "./protocol";
 
 export interface ModelSource {
   id?: string;
@@ -61,7 +61,7 @@ export function modelsFromProvider(providerId: string, provider: ProviderSource)
       id: rawId,
       rawModelId: modelId,
       providerId,
-      name: source.name ?? rawId,
+      name: source.name ?? prettifyModelName(modelId),
       contextLength,
       maxOutputTokens: positive(source.limit?.output, Math.min(contextLength, 8192)),
       reasoning: source.reasoning === true,
@@ -113,7 +113,7 @@ export function minimalGatewayModel(providerId: string, mode: "zen" | "go", rawM
     id: `${providerId}/${rawModelId}`,
     rawModelId,
     providerId,
-    name: rawModelId,
+    name: prettifyModelName(rawModelId),
     contextLength: 128_000,
     maxOutputTokens: 32_768,
     reasoning: false,
@@ -147,17 +147,97 @@ export function nativeOpenAiModels(): Oc3Model[] {
       id: `openai/${id}`,
       rawModelId: id,
       providerId: "openai",
-      name: id,
+      name: prettifyModelName(id),
       contextLength: 400_000,
       maxOutputTokens: 128_000,
       reasoning: true,
       imageInput: true,
       toolCalling: true,
       endpoint: resolveEndpointKind(id, "zen", "@ai-sdk/openai"),
-      baseUrl: process.env.OC3_OPENAI_BASE_URL ?? OPENAI_API_BASE,
+      baseUrl: process.env.OC3_OPENAI_BASE_URL ?? nativeOpenAiBase(),
     });
   }
   return models;
+}
+
+// Display metadata -----------------------------------------------------------
+
+const NAME_TOKENS: Array<[string, string]> = [
+  ["minimax", "MiniMax"],
+  ["deepseek", "DeepSeek"],
+  ["grok", "Grok"],
+  ["claude", "Claude"],
+  ["gemini", "Gemini"],
+  ["qwen", "Qwen"],
+  ["kimi", "Kimi"],
+  ["glm", "GLM"],
+  ["gpt", "GPT"],
+  ["mimo", "MiMo"],
+  ["llm", "LLM"],
+  ["api", "API"],
+  ["hy", "Hybrid"],
+];
+
+/** Raw model ids like "gpt-5.6-sol" become display names like "GPT 5.6 Sol". */
+export function prettifyModelName(rawId: string): string {
+  return rawId.split(/[-_\s]+/).filter(Boolean).map((token) => {
+    const lower = token.toLowerCase();
+    for (const [prefix, canonical] of NAME_TOKENS) {
+      if (lower === prefix || lower.startsWith(prefix)) return canonical + token.slice(prefix.length);
+    }
+    if (/^[a-z]+\d/i.test(token)) return token.charAt(0).toUpperCase() + token.slice(1);
+    if (/^\d/.test(token)) return token;
+    return token.charAt(0).toUpperCase() + token.slice(1);
+  }).join(" ");
+}
+
+export type ModelGroup = "console" | "zen" | "go" | "chatgpt" | "openai" | "other";
+
+/** Which backend family a model belongs to, used for ordering and labels. */
+export function modelGroup(model: Oc3Model): ModelGroup {
+  if (model.providerId === "openai") return "openai";
+  if (model.providerId === "chatgpt") return "chatgpt";
+  if (model.source === "gateway") return model.providerId === "opencode-go" ? "go" : "zen";
+  if (model.source === "console" || model.source === undefined) return "console";
+  return "other";
+}
+
+const GROUP_ORDER: ReadonlyArray<ModelGroup> = ["console", "zen", "go", "chatgpt", "openai", "other"];
+
+/** Stable backend-family ordering: Console, Zen, Go, native ChatGPT, native OpenAI. */
+export function sortModelsByGroup(models: readonly Oc3Model[]): Oc3Model[] {
+  const rank = (model: Oc3Model): number => Math.max(0, GROUP_ORDER.indexOf(modelGroup(model)));
+  return [...models].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
+}
+
+/** Human label for a model's backend family. */
+export function providerLabel(model: Oc3Model): string {
+  switch (modelGroup(model)) {
+    case "openai": return "OpenAI (native)";
+    case "chatgpt": return "ChatGPT (native)";
+    case "zen": return "OpenCode Zen";
+    case "go": return "OpenCode Go";
+    case "console": return "OpenCode Console";
+    default: return model.providerId;
+  }
+}
+
+export function nativeChatGptModels(): Oc3Model[] {
+  const list = (process.env.OC3_CHATGPT_MODELS ?? "gpt-6-astra,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna")
+    .split(",").map((value) => value.trim()).filter(Boolean);
+  return list.map((id) => ({
+    id: `chatgpt/${id}`,
+    rawModelId: id,
+    providerId: "chatgpt",
+    name: prettifyModelName(id),
+    contextLength: 400_000,
+    maxOutputTokens: 128_000,
+    reasoning: true,
+    imageInput: true,
+    toolCalling: true,
+    endpoint: "responses" as EndpointKind,
+    baseUrl: nativeChatGptBase(),
+  }));
 }
 
 export function modelKey(slug: string): string {

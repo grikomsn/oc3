@@ -1,7 +1,7 @@
 import { ensureHome, codexCatalogPath } from "./store";
 import { writeFileSync } from "node:fs";
 import { writeRoutingCatalog } from "./routing-catalog";
-import type { Oc3Model } from "./models";
+import { providerLabel, type Oc3Model } from "./models";
 
 const DEFAULT_REASONING_LEVELS = [
   { description: "Turn thinking off", effort: "none" },
@@ -40,7 +40,7 @@ export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<vo
       default_reasoning_summary: "auto",
       default_service_tier: null,
       default_verbosity: null,
-      description: `${model.name} via OpenCode ${model.providerId}`,
+      description: `${model.name} — ${providerLabel(model)}`,
       display_name: model.name,
       effective_context_window_percent: 95,
       experimental_supported_tools: [],

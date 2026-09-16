@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, write
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
 import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection } from "../src/store";
-import { modelsFromGatewayProvider, minimalGatewayModel, type ProviderSource } from "../src/models";
+import { modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, type ProviderSource } from "../src/models";
 import { credentialForModel, credentialErrorHint } from "../src/credentials";
 import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayResponsesExtras } from "../src/zen";
 import type { Oc3Model } from "../src/models";
@@ -332,6 +332,53 @@ describe("gateway catalog fetch", () => {
     expect(result.errors.some((message) => message.includes("Zen catalog unreachable"))).toBe(true);
     expect(loadCatalogCache().zen).toHaveLength(1);
     setEnv("OC3_ZEN_BASE_URL", `http://127.0.0.1:${ZEN_PORT}/v1`);
+  });
+});
+
+describe("model metadata", () => {
+  test("prettifies raw model ids into display names", () => {
+    expect(prettifyModelName("gpt-5.6-sol")).toBe("GPT 5.6 Sol");
+    expect(prettifyModelName("claude-fable-5")).toBe("Claude Fable 5");
+    expect(prettifyModelName("minimax-m3")).toBe("MiniMax M3");
+    expect(prettifyModelName("glm-5.3-flash")).toBe("GLM 5.3 Flash");
+    expect(prettifyModelName("kimi-k2-thinking")).toBe("Kimi K2 Thinking");
+    expect(prettifyModelName("qwen3.5-plus")).toBe("Qwen3.5 Plus");
+  });
+
+  test("providerLabel distinguishes every backend family", () => {
+    expect(providerLabel(gatewayModel({}))).toBe("OpenCode Zen");
+    expect(providerLabel(gatewayModel({ providerId: "opencode-go", source: "gateway" }))).toBe("OpenCode Go");
+    expect(providerLabel(gatewayModel({ source: "console" }))).toBe("OpenCode Console");
+    expect(providerLabel(gatewayModel({ providerId: "openai" }))).toBe("OpenAI (native)");
+    expect(providerLabel(gatewayModel({ providerId: "chatgpt" }))).toBe("ChatGPT (native)");
+  });
+
+  test("sorts models by backend family", () => {
+    const sorted = sortModelsByGroup([
+      gatewayModel({ providerId: "openai", id: "openai/x", rawModelId: "x" }),
+      gatewayModel({ providerId: "opencode-go", id: "opencode-go/x", rawModelId: "x", source: "gateway" }),
+      gatewayModel({ source: "console" }),
+      gatewayModel({ providerId: "chatgpt", id: "chatgpt/x", rawModelId: "x" }),
+    ]);
+    expect(sorted.map((model) => providerLabel(model))).toEqual([
+      "OpenCode Console",
+      "OpenCode Go",
+      "ChatGPT (native)",
+      "OpenAI (native)",
+    ]);
+  });
+
+  test("nativeChatGptModels uses the chatgpt backend and respects the env list", () => {
+    const defaults = nativeChatGptModels();
+    expect(defaults.map((model) => model.id)).toContain("chatgpt/gpt-6-astra");
+    expect(defaults[0]!.providerId).toBe("chatgpt");
+    expect(defaults[0]!.endpoint).toBe("responses");
+    expect(defaults[0]!.baseUrl).toContain("backend-api/codex");
+    setEnv("OC3_CHATGPT_MODELS", "gpt-6-astra");
+    expect(nativeChatGptModels().map((model) => model.id)).toEqual(["chatgpt/gpt-6-astra"]);
+    setEnv("OC3_CHATGPT_MODELS", "");
+    expect(nativeChatGptModels()).toEqual([]);
+    setEnv("OC3_CHATGPT_MODELS", undefined);
   });
 });
 

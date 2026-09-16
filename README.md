@@ -34,6 +34,7 @@ macOS (arm64/x64) and Linux (x64/arm64). Windows is not supported yet.
 | `oc3 stop` | Restore your previous config and stop the proxy |
 | `oc3 login` | Device-code sign in to OpenCode Console |
 | `oc3 serve` | Proxy only, config untouched |
+| `oc3 keys` | Interactive key menu (opencode-style select + masked input) |
 | `oc3 keys --set KEY` | Store your OpenCode Zen/Go API key (also `--zen`/`--go`, `--clear`) |
 | `oc3 usage` | Show OpenCode Go subscription quota |
 
@@ -50,6 +51,10 @@ oc3 keys --set <zen-api-key>   # or set OPENCODE_API_KEY
 oc3 models --refresh           # Zen/Go catalogs are public; Console sign-in optional
 oc3 start
 ```
+
+| Command | What it does |
+|---|---|
+| `oc3 keys` (in the TUI: `a`) | Pick what to set, paste the key — masked, like `opencode auth login` |
 
 Zen (`opencode/<model>`) is pay-as-you-go, Go (`opencode-go/<model>`) is the
 subscription tier. Free/anonymous models work without any key. oc3 refreshes
@@ -73,6 +78,17 @@ thinking/effort normalization per model family, 426 fallback for desktop
 WebSocket attempts, zstd request bodies, and a routing catalog with per-model
 thinking metadata.
 
+## Model picker groups
+
+The Codex picker catalog is grouped and labeled by backend family, in this
+order: **OpenCode Console** → **OpenCode Zen** (`opencode/<model>`) →
+**OpenCode Go** (`opencode-go/<model>`) → **ChatGPT (native)**
+(`chatgpt/<model>`) → **OpenAI (native)** (`openai/<model>`). Each entry's
+description names its backend, and display names are prettified from raw ids
+("gpt-5.6-sol" → "GPT 5.6 Sol"). The native `chatgpt/*` slugs route to the
+Codex ChatGPT backend with your own account session — disable them with
+`OC3_CHATGPT_MODELS=""` or trim the list.
+
 ## Environment
 
 | Variable | Purpose |
@@ -81,6 +97,7 @@ thinking metadata.
 | `OC3_WEBSEARCH_PROVIDER` | `exa` or `parallel` for hosted search |
 | `OPENAI_API_KEY` | Expose native `openai/<model>` slugs |
 | `OPENCODE_API_KEY` | OpenCode Zen/Go gateway key (alternative to `oc3 keys`) |
+| `OC3_CHATGPT_MODELS` | Comma-separated native `chatgpt/<model>` slugs (empty disables) |
 | `PARALLEL_API_KEY` | Parallel search auth (optional) |
 
 ## Development

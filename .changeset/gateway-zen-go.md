@@ -9,3 +9,6 @@ Cover the full OpenCode provider set: Zen and Go gateway variants alongside Cons
 - Per-model credential routing: native OpenAI keys, gateway API keys, and Console OAuth sessions coexist in one proxy.
 - Gateway wire parity: session-keyed prompt caching, encrypted-reasoning passthrough and auto summaries on Responses; Anthropic Messages and Gemini bridges reuse the gateway key; thinking-mode `chat_template_args`; trailing cost chunks are tolerated.
 - `oc3 usage` shows OpenCode Go subscription quota; TUI shows gateway key status.
+- Key UX: `oc3 keys` opens an interactive opencode-style menu (select + masked password input via @clack/prompts); the TUI gains an `a` panel for pasting the shared key.
+- Model metadata: display names prettified from raw ids, per-backend labels in the Codex picker descriptions, and stable group ordering (Console → Zen → Go → ChatGPT → OpenAI).
+- Native ChatGPT models are separated from the opencode variants: `chatgpt/<model>` slugs route to the ChatGPT backend with the client's own account session (`OC3_CHATGPT_MODELS` configures the list).

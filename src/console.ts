@@ -1,4 +1,4 @@
-import { modelsFromConsoleConfig, nativeOpenAiModels, type Oc3Model } from "./models";
+import { modelsFromConsoleConfig, nativeChatGptModels, nativeOpenAiModels, sortModelsByGroup, type Oc3Model } from "./models";
 import { loadCatalogCache, saveCatalogSection } from "./store";
 import { fetchGatewayModels } from "./zen";
 import type { OpenCodeAuth } from "./auth";
@@ -21,13 +21,15 @@ export async function loadConsoleModels(auth: OpenCodeAuth): Promise<Oc3Model[]>
 
 export function availableModels(): Oc3Model[] {
   const cache = loadCatalogCache();
+  const chatGpt = nativeChatGptModels();
   const openAi = process.env.OPENAI_API_KEY ? nativeOpenAiModels() : [];
-  return [
+  return sortModelsByGroup([
     ...cache.console as Oc3Model[],
     ...cache.zen as Oc3Model[],
     ...cache.go as Oc3Model[],
+    ...chatGpt,
     ...openAi,
-  ];
+  ]);
 }
 
 export interface RefreshResult {
@@ -47,12 +49,13 @@ export async function refreshModels(auth: OpenCodeAuth): Promise<RefreshResult> 
   }
   const refreshed = await refreshGatewayCatalogs();
   errors.push(...refreshed.errors);
-  const models = [
+  const models = sortModelsByGroup([
     ...consoleModels,
     ...refreshed.zen,
     ...refreshed.go,
+    ...nativeChatGptModels(),
     ...(process.env.OPENAI_API_KEY ? nativeOpenAiModels() : []),
-  ];
+  ]);
   return { models, errors };
 }
 

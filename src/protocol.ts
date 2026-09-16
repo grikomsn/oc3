@@ -3,6 +3,16 @@ export const OPENCODE_CLIENT_ID = "opencode-cli";
 export const OPENCODE_CLIENT = "oc3";
 export const USER_AGENT = "oc3/0.1.0";
 export const OPENAI_API_BASE = "https://api.openai.com/v1";
+export const NATIVE_CHATGPT_BASE = "https://chatgpt.com/backend-api/codex";
+export const NATIVE_OPENAI_BASE = "https://api.openai.com/v1";
+
+export function nativeChatGptBase(): string {
+  return process.env.OC3_CHATGPT_FALLBACK_URL ?? NATIVE_CHATGPT_BASE;
+}
+
+export function nativeOpenAiBase(): string {
+  return process.env.OC3_OPENAI_FALLBACK_URL ?? NATIVE_OPENAI_BASE;
+}
 
 export type EndpointKind = "chat-completions" | "messages" | "responses" | "google";
 export type OpenCodeMode = "zen" | "go" | "console";
