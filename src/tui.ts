@@ -98,9 +98,11 @@ export async function runTui(options: TuiOptions): Promise<void> {
   async function loadModels(refresh: boolean): Promise<void> {
     try {
       if (refresh) {
-        statusLine = "Refreshing model catalog from Console...";
+        statusLine = "Refreshing model catalog...";
         renderList();
-        models = await refreshModels(options.auth);
+        const refreshed = await refreshModels(options.auth);
+        models = refreshed.models;
+        statusLine = `Loaded ${models.length} models; codex catalog written.${refreshed.errors.length ? ` Warnings: ${refreshed.errors.join("; ")}` : ""}`;
       } else {
         models = availableModels();
       }

@@ -148,8 +148,11 @@ async function main(): Promise<void> {
       return;
     }
     case "models": {
-      const models = flags.refresh ? await refreshModels(auth) : availableModels();
+      const refreshed = flags.refresh ? await refreshModels(auth) : undefined;
+      const models = refreshed ? refreshed.models : availableModels();
+      for (const error of refreshed?.errors ?? []) console.error(`Warning: ${error}`);
       if (!models.length) {
+        if (refreshed?.errors.length) console.error(refreshed.errors[0]);
         console.log("No models cached. Run: oc3 models --refresh (Console sign-in optional; Zen/Go catalogs are public)");
         process.exitCode = 1;
         return;
@@ -179,8 +182,10 @@ async function main(): Promise<void> {
       }
       let models = availableModels();
       if (!models.length) {
-        console.log("No cached models; refreshing from Console...");
-        models = await refreshModels(auth);
+        console.log("No cached models; refreshing catalogs...");
+        const refreshed = await refreshModels(auth);
+        models = refreshed.models;
+        for (const error of refreshed.errors) console.error(`Warning: ${error}`);
       }
       await writeCodexCatalog(models);
       const overrides = { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${p}/v1` };

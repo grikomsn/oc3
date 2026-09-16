@@ -30,7 +30,12 @@ export function availableModels(): Oc3Model[] {
   ];
 }
 
-export async function refreshModels(auth: OpenCodeAuth): Promise<Oc3Model[]> {
+export interface RefreshResult {
+  models: Oc3Model[];
+  errors: string[];
+}
+
+export async function refreshModels(auth: OpenCodeAuth): Promise<RefreshResult> {
   const errors: string[] = [];
   let consoleModels: Oc3Model[] = [];
   if (auth.isSignedIn()) {
@@ -42,14 +47,13 @@ export async function refreshModels(auth: OpenCodeAuth): Promise<Oc3Model[]> {
   }
   const refreshed = await refreshGatewayCatalogs();
   errors.push(...refreshed.errors);
-  const merged = [
+  const models = [
     ...consoleModels,
     ...refreshed.zen,
     ...refreshed.go,
     ...(process.env.OPENAI_API_KEY ? nativeOpenAiModels() : []),
   ];
-  if (!merged.length && errors.length) throw new Error(errors[0]);
-  return merged;
+  return { models, errors };
 }
 
 export async function refreshGatewayCatalogs(): Promise<{ zen: Oc3Model[]; go: Oc3Model[]; errors: string[] }> {

@@ -145,7 +145,7 @@ export function gatewayChatTemplateArgs(model: Oc3Model): Record<string, unknown
 
 /** Go subscription quota from the gateway's lite-tier usage endpoint. */
 export async function fetchGatewayUsage(goKey: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${GO_API_BASE_URL}/usage`, {
+  const response = await fetch(`${gatewayBaseUrl("go")}/usage`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${goKey}` },
     signal: AbortSignal.timeout(10_000),
   });

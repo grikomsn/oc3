@@ -23,8 +23,12 @@ export async function credentialForModel(model: Oc3Model, auth: OpenCodeAuth): P
   const testToken = process.env.OC3_TEST_TOKEN;
   if (testToken) return { token: testToken };
   if (model.providerId === "opencode" || model.providerId === "opencode-go") {
-    const keys = loadKeys();
-    return { token: gatewayKeyFor(model.providerId, keys) || "public" };
+    // The gateway's own catalogs use its API key; the same provider ids can
+    // also appear in the Console org config, where the session token applies.
+    if ((model.source ?? "console") === "gateway") {
+      const keys = loadKeys();
+      return { token: gatewayKeyFor(model.providerId, keys) || "public" };
+    }
   }
   if (!auth.isSignedIn()) return undefined;
   return await auth.getCredential();
@@ -32,7 +36,8 @@ export async function credentialForModel(model: Oc3Model, auth: OpenCodeAuth): P
 
 export function credentialErrorHint(model: Oc3Model): string {
   if (model.providerId === "openai") return "No credentials for this model provider";
-  if (model.providerId === "opencode" || model.providerId === "opencode-go") {
+  if (model.source === "gateway"
+    && (model.providerId === "opencode" || model.providerId === "opencode-go")) {
     return "No OpenCode API key configured. Run `oc3 keys --set <key>` (or set OPENCODE_API_KEY); free models still work anonymously.";
   }
   return "Not signed in. Run: oc3 login";

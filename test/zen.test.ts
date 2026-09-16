@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
 import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection } from "../src/store";
@@ -48,8 +48,12 @@ const goUpstream = Bun.serve({
   port: GO_PORT,
   async fetch(request) {
     const headers = Object.fromEntries(request.headers.entries());
-    if (new URL(request.url).pathname === "/v1/models") {
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/v1/models") {
       return Response.json({ object: "list", data: [{ id: "minimax-m3" }] });
+    }
+    if (pathname === "/v1/usage") {
+      return Response.json({ usage: { rolling: { percent: 12 }, weekly: { percent: 4 }, monthly: { percent: 1 } } });
     }
     const body = await request.json() as Record<string, unknown>;
     goRequests.push({ url: new URL(request.url).href, headers, body });
@@ -129,6 +133,7 @@ function gatewayModel(overrides: Partial<Oc3Model>): Oc3Model {
     toolCalling: true,
     endpoint: "responses",
     baseUrl: `http://127.0.0.1:${ZEN_PORT}/v1`,
+    source: "gateway",
     ...overrides,
   };
 }
@@ -242,6 +247,18 @@ describe("gateway credential routing", () => {
     setEnv("OC3_TEST_TOKEN", undefined);
   });
 
+  test("console-origin opencode models keep the Console session credential", async () => {
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    writeSession("session-token");
+    const consoleOrigin = await credentialForModel(gatewayModel({ source: "console" }), auth);
+    expect(consoleOrigin?.token).toBe("session-token");
+    expect(consoleOrigin?.orgId).toBe("org-1");
+    expect(credentialErrorHint(gatewayModel({ source: "console" }))).toBe("Not signed in. Run: oc3 login");
+    expect(credentialErrorHint(gatewayModel({ source: "gateway" }))).toContain("oc3 keys --set");
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+  });
+
   test("console and openai credentials keep their own hint messages", async () => {
     setEnv("OPENAI_API_KEY", undefined);
     const openAi = await credentialForModel(gatewayModel({ providerId: "openai" }), auth);
@@ -254,6 +271,21 @@ describe("gateway credential routing", () => {
 
 async function tokenFor(model: Oc3Model): Promise<string | undefined> {
   return (await credentialForModel(model, auth))?.token;
+}
+
+function writeSession(token: string, server = "https://opencode.ai/console"): void {
+  writeFileSync(`${process.env.OC3_HOME}/session.json`, JSON.stringify({
+    mode: "console",
+    server,
+    accessToken: token,
+    refreshToken: "refresh",
+    expiresAt: Date.now() + 3600_000,
+    accountId: "acct-1",
+    email: "test@example.com",
+    orgs: [{ id: "org-1", name: "Org" }],
+    orgId: "org-1",
+    orgName: "Org",
+  }, null, 2));
 }
 
 describe("keys store", () => {
@@ -303,6 +335,27 @@ describe("gateway catalog fetch", () => {
   });
 });
 
+describe("gateway usage endpoint", () => {
+  test("honors the OC3_GO_BASE_URL override", async () => {
+    const { fetchGatewayUsage } = await import("../src/zen");
+    const usage = await fetchGatewayUsage("go-key-456");
+    expect(usage.usage).toBeDefined();
+    expect(usage.usage).toMatchObject({ rolling: { percent: 12 } });
+  });
+});
+
+describe("refresh error surfacing", () => {
+  test("reports console failures without losing gateway models", async () => {
+    saveCatalogSection("zen", [gatewayModel({})]);
+    writeSession("session-token", "http://127.0.0.1:59998");
+    const { refreshModels } = await import("../src/console");
+    const result = await refreshModels(auth);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.models.find((model) => model.providerId === "opencode")).toBeDefined();
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+  });
+});
+
 describe("oc3 proxy server with gateway models", () => {
   beforeAll(() => {
     saveKeys({ zen: "zen-key-123" });
@@ -323,6 +376,21 @@ describe("oc3 proxy server with gateway models", () => {
         toolCalling: true,
         endpoint: "chat-completions",
         baseUrl: `http://127.0.0.1:${GO_PORT}/v1`,
+        source: "gateway",
+      },
+      {
+        id: "opencode-go/kimi-k2-thinking",
+        rawModelId: "kimi-k2-thinking",
+        providerId: "opencode-go",
+        name: "Kimi thinking",
+        contextLength: 200000,
+        maxOutputTokens: 32000,
+        reasoning: true,
+        imageInput: false,
+        toolCalling: true,
+        endpoint: "chat-completions",
+        baseUrl: `http://127.0.0.1:${GO_PORT}/v1`,
+        source: "gateway",
       },
     ]);
     saveCatalogSection("console", []);
@@ -367,6 +435,23 @@ describe("oc3 proxy server with gateway models", () => {
     expect(text).toContain("response.output_text.delta");
     expect(goRequests).toHaveLength(1);
     expect(goRequests[0]!.headers.authorization).toBe("Bearer zen-key-123");
+    expect("chat_template_args" in goRequests[0]!.body).toBe(false);
+    handle.stop();
+  });
+
+  test("sends gateway chat_template_args to thinking-mode chat models", async () => {
+    const handle = await startServer({ port: PROXY_PORT + 3, auth });
+    const response = await postResponses(handle.port, {
+      model: "opencode-go/kimi-k2-thinking",
+      stream: true,
+      store: false,
+      input: "hello",
+      reasoning: { effort: "high" },
+    });
+    expect(response.status).toBe(200);
+    const request = goRequests[goRequests.length - 1]!;
+    expect(request.body.model).toBe("kimi-k2-thinking");
+    expect(request.body.chat_template_args).toEqual({ enable_thinking: true });
     handle.stop();
   });
 
@@ -384,6 +469,7 @@ describe("oc3 proxy server with gateway models", () => {
         toolCalling: true,
         endpoint: "messages",
         baseUrl: `http://127.0.0.1:${GO_PORT}/v1`,
+        source: "gateway",
       },
     ]);
     const handle = await startServer({ port: PROXY_PORT + 2, auth });

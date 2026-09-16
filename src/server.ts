@@ -196,7 +196,6 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
 
   body = applyReasoningWire(body, model);
   const templateArgs = gatewayChatTemplateArgs(model);
-  if (templateArgs) body = { ...body, ...templateArgs };
   if (searchBridgeNeeded(body, model)) {
     return await runSearchBridgeLoop(request, body, model, auth, sessionId);
   }
@@ -204,6 +203,7 @@ async function handleResponses(request: Request, auth: OpenCodeAuth, sessionId: 
   const chatUrl = endpointUrl(model.baseUrl, "chat-completions", model.rawModelId);
   let attempt = 0;
   let currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
+  if (templateArgs) currentBody = { ...currentBody, ...templateArgs };
   while (true) {
     let upstream: Response;
     try {
@@ -404,7 +404,9 @@ async function runOneChatTurn(
   if (credential.orgId) headers["x-org-id"] = credential.orgId;
   const chatRequest = responsesRequestToChat(body, model);
   let attempt = 0;
-  const currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
+  let currentBody: Record<string, unknown> = chatRequest as unknown as Record<string, unknown>;
+  const templateArgs = gatewayChatTemplateArgs(model);
+  if (templateArgs) currentBody = { ...currentBody, ...templateArgs };
   while (true) {
     let upstream: Response;
     try {

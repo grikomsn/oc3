@@ -37,6 +37,9 @@ export interface Oc3Model {
   toolCalling: boolean;
   endpoint: EndpointKind;
   baseUrl: string;
+  // Which catalog produced this entry; gateway ids may also appear in the
+  // Console org config, where the Console session token is the credential.
+  source?: "console" | "gateway";
   headers?: Record<string, string>;
   body?: Record<string, unknown>;
 }
@@ -66,6 +69,7 @@ export function modelsFromProvider(providerId: string, provider: ProviderSource)
       toolCalling: source.tool_call === true,
       endpoint: resolveEndpointKind(modelId, "console", packageName),
       baseUrl,
+      source: "console",
       ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
       ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
     }];
@@ -96,6 +100,7 @@ export function modelsFromGatewayProvider(providerId: string, provider: Provider
       toolCalling: source.tool_call === true,
       endpoint: resolveEndpointKind(modelId, mode, packageName),
       baseUrl,
+      source: "gateway",
       ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
       ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
     }];
@@ -116,6 +121,7 @@ export function minimalGatewayModel(providerId: string, mode: "zen" | "go", rawM
     toolCalling: true,
     endpoint: resolveEndpointKind(rawModelId, mode),
     baseUrl: apiBaseForMode(mode),
+    source: "gateway",
   };
 }
 
