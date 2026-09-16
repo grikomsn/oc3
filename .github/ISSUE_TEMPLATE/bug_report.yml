@@ -1,0 +1,75 @@
+name: Bug Report
+about: Create a report to help us improve oc3
+title: "[BUG] "
+labels: ["bug"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report! 🐛
+
+        > This is for **oc3**, the OpenCode Console proxy for Codex. Please check the [README](README.md) first.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is
+      placeholder: Describe the bug in detail...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Run `oc3 login` ...
+        2. Run `oc3 start` ...
+        3. Open Codex with model '...' ...
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: oc3 Version
+      description: Output of `oc3 --version` (or commit hash)
+      placeholder: e.g., 0.0.1
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Output from `oc3 logs` or the terminal
+      render: shell
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites Check
+      description: Please confirm the following
+      options:
+        - label: I have read the [README](README.md) and [CONTRIBUTING](CONTRIBUTING.md) guides
+          required: true
+        - label: I have checked that this issue has not already been reported
+          required: true
+        - label: I can reproduce this issue consistently
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here (models used, config, environment)

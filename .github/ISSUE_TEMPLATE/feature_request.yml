@@ -1,0 +1,64 @@
+name: Feature Request
+about: Suggest an idea for oc3
+title: "[FEATURE] "
+labels: ["enhancement"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! 💡
+
+        > This is for **oc3**, the OpenCode Console proxy for Codex.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature Description
+      description: A clear and concise description of the feature you'd like to see
+      placeholder: Describe the feature in detail...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case / Problem Statement
+      description: What problem does this feature solve? Who would benefit?
+      placeholder: |
+        - As a [type of user], I want [goal] so that [benefit]
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Feature Scope
+      description: Which areas does this feature relate to?
+      options:
+        - label: Model routing and translation
+        - label: OpenCode Console auth and org handling
+        - label: ChatGPT desktop / Codex transport
+        - label: Web search bridging
+        - label: TUI / CLI experience
+        - label: Documentation
+        - label: CI/CD and release automation
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites Check
+      description: Please confirm the following
+      options:
+        - label: I have read the [README](README.md) and checked if the feature already exists
+          required: true
+        - label: This feature would be useful to other oc3 users
+          required: true
+        - label: I am willing to contribute to implementing this feature (optional)
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context, mockups, or screenshots about the feature request here

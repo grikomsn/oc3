@@ -1,7 +1,7 @@
 {
   "name": "oc3",
   "version": "0.0.1",
-  "description": "Minimal OpenCode Console proxy for Codex and ChatGPT desktop",
+  "description": "OpenCode Console proxy for OpenAI Codex and ChatGPT desktop",
   "type": "module",
   "bin": {
     "oc3": "./src/cli.ts"
@@ -35,5 +35,27 @@
   "private": true,
   "workspaces": [
     "npm"
-  ]
+  ],
+  "homepage": "https://oc3.nbr.st",
+  "author": "Griko Nibras <griko@nibras.co> (https://griko.id)",
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "opencode",
+    "proxy",
+    "cli",
+    "llm",
+    "bun",
+    "opentui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grikomsn/oc3.git"
+  },
+  "bugs": {
+    "url": "https://github.com/grikomsn/oc3/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

@@ -18,6 +18,14 @@ logs/
 dist/
 *.tsbuildinfo
 
+# npm (bun.lock is authoritative; npm-generated package-lock.json is stale)
+package-lock.json
+npm-debug.log*
+
+# misc junk
+*.orig
+.DS_Store?
+
 # Editor
 .vscode/
 .idea/

@@ -3,7 +3,11 @@
   "version": "0.0.1",
   "description": "OpenCode Console proxy for OpenAI Codex and ChatGPT desktop",
   "license": "MIT",
-  "repository": "https://github.com/grikomsn/oc3",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grikomsn/oc3.git",
+    "directory": "npm"
+  },
   "homepage": "https://oc3.nbr.st",
   "bin": {
     "oc3": "./bin/cli.js"
@@ -26,5 +30,18 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
+  },
+  "author": "Griko Nibras <griko@nibras.co> (https://griko.id)",
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "opencode",
+    "proxy",
+    "cli",
+    "llm",
+    "bun"
+  ],
+  "bugs": {
+    "url": "https://github.com/grikomsn/oc3/issues"
   }
 }
