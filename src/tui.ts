@@ -7,6 +7,7 @@ import {
   SelectRenderableEvents,
   TextRenderable,
   createCliRenderer,
+  RGBA,
 } from "@opentui/core";
 import type { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
@@ -26,6 +27,16 @@ interface TuiOptions {
 }
 
 type ViewId = "models" | "account" | "gateway" | "proxy" | "logs";
+
+// Theme-following palette: terminal default fg/bg plus ANSI palette slots so
+// the TUI renders correctly under any terminal color scheme.
+const THEME_TEXT = RGBA.defaultForeground();
+const THEME_BG = RGBA.defaultBackground();
+const THEME_ACCENT = RGBA.fromIndex(12); // brightBlue — titles, help heading
+const THEME_GOOD = RGBA.fromIndex(10); // brightGreen — status, account badge
+const THEME_WARN = RGBA.fromIndex(11); // brightYellow — action labels
+const THEME_MUTED = RGBA.fromIndex(8); // brightBlack — hints, footer, dim values
+const THEME_ACTIVE = RGBA.fromIndex(15); // brightWhite — active tab
 
 const VIEWS: Array<{ id: ViewId; label: string }> = [
   { id: "models", label: "Models" },
@@ -176,7 +187,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
 
   const root = new BoxRenderable(renderer, {
     flexDirection: "column",
-    backgroundColor: "#101014",
+    backgroundColor: THEME_BG,
     width: "100%",
     height: "100%",
   });
@@ -185,8 +196,8 @@ export async function runTui(options: TuiOptions): Promise<void> {
   // Header: brand + account.
   const header = new BoxRenderable(renderer, { flexDirection: "column", paddingLeft: 1, paddingRight: 1 });
   const titleLine = new BoxRenderable(renderer, { flexDirection: "row", justifyContent: "space-between", width: "100%" });
-  const title = new TextRenderable(renderer, { content: "oc3 — OpenCode Console proxy", fg: "#8AB4FF" });
-  const accountBadge = new TextRenderable(renderer, { content: "", fg: "#9BE49B" });
+  const title = new TextRenderable(renderer, { content: "oc3 — OpenCode Console proxy", fg: THEME_ACCENT });
+  const accountBadge = new TextRenderable(renderer, { content: "", fg: THEME_GOOD });
   titleLine.add(title);
   titleLine.add(accountBadge);
   header.add(titleLine);
@@ -196,7 +207,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   const tabs = new Map<ViewId, TextRenderable>();
   for (let index = 0; index < VIEWS.length; index += 1) {
     const view = VIEWS[index]!;
-    const tab = new TextRenderable(renderer, { content: "", fg: "#707880" });
+    const tab = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
     tabs.set(view.id, tab);
     tabRow.add(tab);
   }
@@ -208,9 +219,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
   root.add(content);
 
   // Status + footer.
-  const status = new TextRenderable(renderer, { content: "", fg: "#9BE494" });
+  const status = new TextRenderable(renderer, { content: "", fg: THEME_GOOD });
   root.add(status);
-  const footer = new TextRenderable(renderer, { content: "", fg: "#707880" });
+  const footer = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
   root.add(footer);
 
   // --- models view ---
@@ -307,14 +318,14 @@ export async function runTui(options: TuiOptions): Promise<void> {
 
   // --- account view ---
   const accountView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
-  const accountInfo = new TextRenderable(renderer, { content: "", fg: "#C5C8D6" });
+  const accountInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
   const orgSelect = new SelectRenderable(renderer, { flexGrow: 1, width: "100%", showDescription: true, showScrollIndicator: true });
-  const loginPanel = new BoxRenderable(renderer, { flexDirection: "column", backgroundColor: "#161620", width: "100%", paddingLeft: 1 });
+  const loginPanel = new BoxRenderable(renderer, { flexDirection: "column", backgroundColor: THEME_BG, width: "100%", paddingLeft: 1 });
   loginPanel.visible = false;
   const loginLines = [
-    new TextRenderable(renderer, { content: "", fg: "#F0C674" }),
-    new TextRenderable(renderer, { content: "", fg: "#C5C8D6" }),
-    new TextRenderable(renderer, { content: "", fg: "#888899" }),
+    new TextRenderable(renderer, { content: "", fg: THEME_WARN }),
+    new TextRenderable(renderer, { content: "", fg: THEME_TEXT }),
+    new TextRenderable(renderer, { content: "", fg: THEME_MUTED }),
   ];
   for (const line of loginLines) loginPanel.add(line);
   accountView.add(accountInfo);
@@ -394,17 +405,17 @@ export async function runTui(options: TuiOptions): Promise<void> {
 
   // --- gateway view ---
   const gatewayView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
-  const keysInfo = new TextRenderable(renderer, { content: "", fg: "#C5C8D6" });
-  const editLabel = new TextRenderable(renderer, { content: "", fg: "#F0C674" });
+  const keysInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
+  const editLabel = new TextRenderable(renderer, { content: "", fg: THEME_WARN });
   const keyInput = new InputRenderable(renderer, {
     placeholder: "press z (zen) or g (go) to paste a key…",
     maxLength: 200,
     width: "100%",
   });
-  const storedLabel = new TextRenderable(renderer, { content: "", fg: "#888899" });
+  const storedLabel = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
   const usageBox = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%" });
-  const usageTitle = new TextRenderable(renderer, { content: "Go quota (u refreshes):", fg: "#C5C8D6" });
-  const usageText = new TextRenderable(renderer, { content: "", fg: "#888899" });
+  const usageTitle = new TextRenderable(renderer, { content: "Go quota (u refreshes):", fg: THEME_TEXT });
+  const usageText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
   usageBox.add(usageTitle);
   usageBox.add(usageText);
   gatewayView.add(keysInfo);
@@ -480,10 +491,10 @@ export async function runTui(options: TuiOptions): Promise<void> {
 
   // --- proxy view ---
   const proxyView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
-  const proxyInfo = new TextRenderable(renderer, { content: "", fg: "#C5C8D6" });
-  const overridesInfo = new TextRenderable(renderer, { content: "", fg: "#C5C8D6" });
-  const requestsTitle = new TextRenderable(renderer, { content: "Recent /responses requests:", fg: "#C5C8D6" });
-  const requestsText = new TextRenderable(renderer, { content: "", fg: "#888899" });
+  const proxyInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
+  const overridesInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
+  const requestsTitle = new TextRenderable(renderer, { content: "Recent /responses requests:", fg: THEME_TEXT });
+  const requestsText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
   proxyView.add(proxyInfo);
   proxyView.add(overridesInfo);
   proxyView.add(requestsTitle);
@@ -560,9 +571,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
 
   // --- logs view ---
   const logsView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1 });
-  const logsHint = new TextRenderable(renderer, { content: "serve.log tail — r: reload", fg: "#707880" });
-  const logsBox = new ScrollBoxRenderable(renderer, { flexGrow: 1, width: "100%", stickyScroll: true, stickyStart: "bottom", backgroundColor: "#101014" });
-  const logsText = new TextRenderable(renderer, { content: "", fg: "#888899" });
+  const logsHint = new TextRenderable(renderer, { content: "serve.log tail — r: reload", fg: THEME_MUTED });
+  const logsBox = new ScrollBoxRenderable(renderer, { flexGrow: 1, width: "100%", stickyScroll: true, stickyStart: "bottom", backgroundColor: THEME_BG });
+  const logsText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
   logsBox.add(logsText);
   logsView.add(logsHint);
   logsView.add(logsBox);
@@ -608,7 +619,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
       const tab = tabs.get(view.id)!;
       const isActive = view.id === active;
       tab.content = `[${index + 1}] ${isActive ? view.label.toUpperCase() : view.label}  `;
-      tab.fg = isActive ? "#FFFFFF" : "#707880";
+      tab.fg = isActive ? THEME_ACTIVE : THEME_MUTED;
     }
   }
 
@@ -647,7 +658,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   const helpBox = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
   helpBox.visible = false;
   content.add(helpBox);
-  helpBox.add(new TextRenderable(renderer, { content: "oc3 — keybindings", fg: "#8AB4FF" }));
+  helpBox.add(new TextRenderable(renderer, { content: "oc3 — keybindings", fg: THEME_ACCENT }));
   for (const line of [
     "[1-5] or tab        switch views (Models, Account, Gateway, Proxy, Logs)",
     "j / k               move selection (Shift for fast scroll)",
@@ -660,7 +671,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     "?                  toggle this help",
     "q or Esc           quit",
   ]) {
-    helpBox.add(new TextRenderable(renderer, { content: line, fg: "#888899" }));
+    helpBox.add(new TextRenderable(renderer, { content: line, fg: THEME_MUTED }));
   }
 
   // Poll timers: proxy request feed, logs tail.
