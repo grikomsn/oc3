@@ -15,7 +15,7 @@ import { launchChatGptDesktop, daemonRunning, readDaemonInfo, removeStaleDaemonF
 import { applyCodexOverrides, overridesApplied, readBackup, restoreCodexOverrides } from "./codex-config";
 import { codexCatalogPath, loadKeys, loadState, saveKeys, saveState } from "./store";
 import { fetchGatewayUsage, gatewayKeyFor } from "./zen";
-import { displayName, sortModelsByGroup, type Oc3Model } from "./models";
+import { displayName, providerLabel, sortModelsByGroup, type Oc3Model } from "./models";
 import { startServer, type RequestRecord, type ServerHandle } from "./server";
 
 interface TuiOptions {
@@ -37,12 +37,67 @@ const VIEWS: Array<{ id: ViewId; label: string }> = [
 
 // --- pure helpers (unit-tested) ---
 
+/**
+ * Subsequence fuzzy score for `needle` against `haystack`, or undefined when
+ * the needle is not a (case-insensitive) subsequence. Higher is better:
+ * exact and prefix matches rank above word-start matches, which rank above
+ * scattered subsequence matches; consecutive runs and small gaps adjust.
+ */
+export function fuzzyScore(haystack: string, needle: string): number | undefined {
+  const hay = haystack.toLowerCase();
+  const ned = needle.toLowerCase();
+  if (!ned) return 0;
+  const isWordChar = (char: string) => /[a-z0-9]/.test(char);
+  let score = 0;
+  let searchFrom = 0;
+  let previous = -2;
+  for (const char of ned) {
+    const at = hay.indexOf(char, searchFrom);
+    if (at === -1) return undefined;
+    score += 10;
+    if (at === previous + 1) score += 7;
+    if (at === 0 || !isWordChar(hay[at - 1]!)) score += 5;
+    score -= Math.min(3, Math.max(0, at - previous - 2));
+    previous = at;
+    searchFrom = at + 1;
+  }
+  if (hay === ned) score += 30;
+  else if (hay.startsWith(ned)) score += 15;
+  return score;
+}
+
+/** Mask an API key for display: `sk-1a…9f`, or "not set". */
+export function maskKey(value: string | undefined): string {
+  if (!value) return "not set";
+  if (value.length <= 8) return "••••••";
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+const FUZZY_FIELDS = (model: Oc3Model): string[] => [
+  model.id,
+  model.name,
+  displayName(model),
+  model.endpoint,
+  providerLabel(model),
+];
+
+/** Fuzzy filter; empty query keeps the grouped order, otherwise best score wins. */
 export function filterModels(models: readonly Oc3Model[], query: string): Oc3Model[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return [...models];
-  return models.filter((model) =>
-    `${model.id} ${model.name} ${displayName(model)} ${model.endpoint}`.toLowerCase().includes(needle),
-  );
+  const base = sortModelsByGroup(models);
+  const needle = query.trim();
+  if (!needle) return base;
+  return base
+    .map((model, index) => {
+      let score: number | undefined;
+      for (const field of FUZZY_FIELDS(model)) {
+        const fieldScore = fuzzyScore(field, needle);
+        if (fieldScore !== undefined && (score === undefined || fieldScore > score)) score = fieldScore;
+      }
+      return { model, index, score };
+    })
+    .filter((entry) => entry.score !== undefined)
+    .sort((a, b) => (b.score as number) - (a.score as number) || a.index - b.index)
+    .map((entry) => entry.model);
 }
 
 export function modelDescription(model: Oc3Model): string {
@@ -50,7 +105,18 @@ export function modelDescription(model: Oc3Model): string {
     ? ` · $${formatCost(model.cost.input)}/${formatCost(model.cost.output)}`
     : "";
   const efforts = model.reasoningEfforts?.length ? ` · ${model.reasoningEfforts.join("/")}` : "";
-  return `${model.endpoint} · ctx ${model.contextLength}${cost}${efforts}`;
+  return `${model.endpoint} · ctx ${formatContextLength(model.contextLength)}${cost}${efforts}`;
+}
+
+/** Compact context length: 400k / 1.2M. */
+export function formatContextLength(value: number): string {
+  if (value >= 1_000_000) return `${trimZero(value / 1_000_000)}M`;
+  if (value >= 1000) return `${trimZero(value / 1000)}k`;
+  return String(value);
+}
+
+function trimZero(value: number): string {
+  return String(Number(value.toFixed(1)));
 }
 
 function formatCost(value: number | undefined): string {
@@ -96,6 +162,17 @@ export async function runTui(options: TuiOptions): Promise<void> {
   let handle: ServerHandle | undefined;
   let statusLine = "";
   const timers: ReturnType<typeof setInterval>[] = [];
+  // Deferred focus timers: focusing within the same keypress event leaks the
+  // trigger character into the freshly focused input, so focus lands next tick.
+  const focusTimers: ReturnType<typeof setTimeout>[] = [];
+
+  function focusLater(target: InputRenderable): void {
+    focusTimers.push(setTimeout(() => {
+      try {
+        target.focus();
+      } catch { /* renderer already destroyed */ }
+    }, 0));
+  }
 
   const root = new BoxRenderable(renderer, {
     flexDirection: "column",
@@ -175,7 +252,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   function openFilter(): void {
     filterOpen = true;
     filterInput.visible = true;
-    filterInput.focus();
+    focusLater(filterInput);
   }
 
   function closeFilter(clearText: boolean): void {
@@ -318,54 +395,68 @@ export async function runTui(options: TuiOptions): Promise<void> {
   // --- gateway view ---
   const gatewayView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
   const keysInfo = new TextRenderable(renderer, { content: "", fg: "#C5C8D6" });
-  const zenInput = new InputRenderable(renderer, { placeholder: "Paste Zen API key — Enter saves, Esc closes…", maxLength: 200, width: "100%" });
-  const goInput = new InputRenderable(renderer, { placeholder: "Paste Go API key — Enter saves, Esc closes…", maxLength: 200, width: "100%" });
+  const editLabel = new TextRenderable(renderer, { content: "", fg: "#F0C674" });
+  const keyInput = new InputRenderable(renderer, {
+    placeholder: "press z (zen) or g (go) to paste a key…",
+    maxLength: 200,
+    width: "100%",
+  });
+  const storedLabel = new TextRenderable(renderer, { content: "", fg: "#888899" });
   const usageBox = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%" });
   const usageTitle = new TextRenderable(renderer, { content: "Go quota (u refreshes):", fg: "#C5C8D6" });
   const usageText = new TextRenderable(renderer, { content: "", fg: "#888899" });
   usageBox.add(usageTitle);
   usageBox.add(usageText);
   gatewayView.add(keysInfo);
-  gatewayView.add(zenInput);
-  gatewayView.add(goInput);
+  gatewayView.add(editLabel);
+  gatewayView.add(keyInput);
+  gatewayView.add(storedLabel);
   gatewayView.add(usageBox);
   content.add(gatewayView);
 
   let gatewayEdit: "zen" | "go" | undefined;
   let usageLoading = false;
 
-  zenInput.on(InputRenderableEvents.ENTER, (value: string) => {
+  keyInput.on(InputRenderableEvents.ENTER, (value: string) => {
     const key = value.trim();
-    if (key) {
-      saveKeys({ ...loadKeys(), zen: key });
-      statusLine = "Zen key saved (shared Zen/Go).";
+    if (gatewayEdit && key) {
+      const target = gatewayEdit;
+      saveKeys({ ...loadKeys(), [target]: key });
+      statusLine = `${target === "zen" ? "Zen" : "Go"} key saved (${maskKey(key)}).`;
     }
-    gatewayEdit = undefined;
-    zenInput.blur();
-    renderGateway();
-  });
-  goInput.on(InputRenderableEvents.ENTER, (value: string) => {
-    const key = value.trim();
-    if (key) {
-      saveKeys({ ...loadKeys(), go: key });
-      statusLine = "Go key saved.";
-    }
-    gatewayEdit = undefined;
-    goInput.blur();
+    cancelGatewayEdit();
     renderGateway();
   });
 
   function editGatewayKey(target: "zen" | "go"): void {
     gatewayEdit = target;
-    (target === "zen" ? zenInput : goInput).focus();
+    keyInput.value = "";
+    keyInput.placeholder = `paste ${target} key — Enter saves, Esc cancels…`;
+    focusLater(keyInput);
+    renderGateway();
+  }
+
+  function switchGatewayEdit(): void {
+    editGatewayKey(gatewayEdit === "zen" ? "go" : "zen");
+  }
+
+  function cancelGatewayEdit(): void {
+    gatewayEdit = undefined;
+    keyInput.value = "";
+    keyInput.placeholder = "press z (zen) or g (go) to paste a key…";
+    keyInput.blur();
   }
 
   function renderGateway(): void {
     const keys = loadKeys();
-    const show = (value: string) => (value ? "set" : "not set");
-    keysInfo.content = `gateway keys —  zen: ${show(gatewayKeyFor("opencode", keys))}  ·  go: ${show(gatewayKeyFor("opencode-go", keys))}  ·  z: edit zen  g: edit go  c: clear  (keys live in OC3_HOME/keys.json)`;
-    zenInput.visible = gatewayEdit === "zen";
-    goInput.visible = gatewayEdit === "go";
+    const envKey = process.env.OPENCODE_API_KEY;
+    const fromEnv = !keys.zen && !keys.go && envKey ? " (env)" : "";
+    keysInfo.content = "gateway keys — get one at https://opencode.ai/auth · z: paste zen · g: paste go · tab: switch · enter: save · esc: cancel · c: clear all";
+    const show = (value: string | undefined) => maskKey(value);
+    storedLabel.content = `zen: ${show(gatewayKeyFor("opencode", keys))}${fromEnv}  ·  go: ${show(gatewayKeyFor("opencode-go", keys))}${fromEnv}  ·  stored in OC3_HOME/keys.json (0600)`;
+    editLabel.content = gatewayEdit
+      ? `→ pasting ${gatewayEdit.toUpperCase()} key  (current: ${show(gatewayEdit === "zen" ? keys.zen ?? keys.go ?? envKey : keys.go ?? keys.zen ?? envKey)})`
+      : "";
     refreshStatus();
   }
 
@@ -504,9 +595,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     if (next === "proxy") renderProxy();
     if (next === "logs") loadLogs();
     if (next !== "gateway" && gatewayEdit) {
-      gatewayEdit = undefined;
-      zenInput.blur();
-      goInput.blur();
+      cancelGatewayEdit();
     }
     if (next !== "models" && filterOpen) closeFilter(true);
     renderTabs();
@@ -530,7 +619,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     const footers: Record<ViewId, string> = {
       models: "j/k move · Enter set default · r refresh · / filter · [1-5] views · ? help · q quit",
       account: "j/k move · Enter switch org · l sign in · x sign out · [1-5] views · ? help · q quit",
-      gateway: "z/g edit keys · Enter save · c clear keys · u refresh quota · [1-5] views · ? help · q quit",
+      gateway: "z/g paste key · tab switch · Enter save · c clear · u quota · [1-5] views · ? help · q quit",
       proxy: "s server/daemon · e overrides · d boot desktop · [1-5] views · ? help · q quit",
       logs: "r reload · [1-5] views · ? help · q quit",
     };
@@ -590,11 +679,10 @@ export async function runTui(options: TuiOptions): Promise<void> {
     }
     if (gatewayEdit) {
       if (key.name === "escape") {
-        gatewayEdit = undefined;
-        zenInput.blur();
-        goInput.blur();
+        cancelGatewayEdit();
         renderGateway();
       }
+      else if (key.name === "tab") switchGatewayEdit();
       return;
     }
     if (helpOpen) {
@@ -605,6 +693,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     }
     if (key.name === "q") {
       for (const timer of timers) clearInterval(timer);
+      for (const timer of focusTimers) clearTimeout(timer);
       handle?.stop();
       renderer.destroy();
       return;
@@ -612,6 +701,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     if (key.name === "escape") {
       // Esc on Models toggles help off / quits only via q; here: quit.
       for (const timer of timers) clearInterval(timer);
+      for (const timer of focusTimers) clearTimeout(timer);
       handle?.stop();
       renderer.destroy();
       return;

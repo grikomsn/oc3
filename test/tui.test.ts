@@ -74,7 +74,7 @@ describe("TUI shell", () => {
     expect(frame).toContain("[1] MODELS");
     expect(frame).toContain("GPT Model [Console]");
     expect(frame).toContain("Qwen Coder [Zen]");
-    expect(frame).toContain("ctx 400000");
+    expect(frame).toContain("ctx 400k");
   });
 
   test("switches to the Gateway view and shows key status", async () => {
@@ -83,6 +83,35 @@ describe("TUI shell", () => {
     const frame = captureFrame();
     expect(frame).toContain("[3] GATEWAY");
     expect(frame).toContain("gateway keys");
+  });
+
+  test("gateway key editing saves with masked display", async () => {
+    mockInput.pressKey("3");
+    await Bun.sleep(50);
+    mockInput.pressKey("z");
+    await Bun.sleep(50);
+    expect(captureFrame()).toContain("pasting ZEN");
+    await mockInput.typeText("sk-test-12345678");
+    mockInput.pressEnter();
+    await Bun.sleep(100);
+    const frame = captureFrame();
+    expect(frame).toContain("Zen key saved (sk-t…5678)");
+    expect(frame).toContain("zen: sk-t…5678");
+  });
+
+  test("fuzzy filter narrows the model list live", async () => {
+    mockInput.pressKey("1");
+    await Bun.sleep(50);
+    mockInput.pressKey("/");
+    await Bun.sleep(50);
+    await mockInput.typeText("qwc");
+    await Bun.sleep(100);
+    const frame = captureFrame();
+    expect(frame).toContain("Qwen Coder [Zen]");
+    expect(frame).not.toContain("GPT Model [Console]");
+    mockInput.pressEscape();
+    await Bun.sleep(150);
+    expect(captureFrame()).not.toContain("qwc");
   });
 
   test("switches to the Proxy view and shows server state", async () => {
