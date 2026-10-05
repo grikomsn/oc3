@@ -21,15 +21,15 @@
     },
     "npm": {
       "name": "@nbrst/oc3",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "bin": {
         "oc3": "./bin/cli.js",
       },
       "optionalDependencies": {
-        "@nbrst/oc3-darwin-arm64": "0.0.1",
-        "@nbrst/oc3-darwin-x64": "0.0.1",
-        "@nbrst/oc3-linux-arm64": "0.0.1",
-        "@nbrst/oc3-linux-x64": "0.0.1",
+        "@nbrst/oc3-darwin-arm64": "0.1.0",
+        "@nbrst/oc3-darwin-x64": "0.1.0",
+        "@nbrst/oc3-linux-arm64": "0.1.0",
+        "@nbrst/oc3-linux-x64": "0.1.0",
       },
     },
   },
@@ -165,6 +165,14 @@
     "@manypkg/tools": ["@manypkg/tools@2.1.2", "", { "dependencies": { "jju": "^1.4.0", "tinyglobby": "^0.2.13", "yaml": "^2.9.0" } }, "sha512-6QEf6yqFbETdwGITKq57aYoPfX/3K8XFNwsAlx0C1M7o8cb79sv1M3w+tWuWvIcSbNqrLF7OD7YpZMVVz335hQ=="],
 
     "@nbrst/oc3": ["@nbrst/oc3@workspace:npm"],
+
+    "@nbrst/oc3-darwin-arm64": ["@nbrst/oc3-darwin-arm64@0.1.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-NwXGwGTT/DyB5vSwF6rgaX0ZL1LyCacdaoBImaZ6wW0EeN6AJCm6gO5xoAAC5V3ym9ftMFR89sBNdpxRNus/3w=="],
+
+    "@nbrst/oc3-darwin-x64": ["@nbrst/oc3-darwin-x64@0.1.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-dunUfv8nDWyJ4yJXV+EC0dxZS6TZt8E1TsV10oNKqZEg2hAkvz8R4ovgtgYtCtGNINeotVOhqzjK9iV5TeYAoA=="],
+
+    "@nbrst/oc3-linux-arm64": ["@nbrst/oc3-linux-arm64@0.1.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-dXAbX8qtOCHm9IkImfNpN3RN46Umnc9PHv6gve48KwnevO0IBKVZ1jNrQWLHmGL/N+Lbxm1HuqKE0OXgWI9tgg=="],
+
+    "@nbrst/oc3-linux-x64": ["@nbrst/oc3-linux-x64@0.1.0", "", { "os": "linux", "cpu": "x64" }, "sha512-o5IJg50ua5+bJ6mwMm+Ki6NpLgyykHUkYEkuS+OwAWGlA/8jOMz3W5SsFLMuUFZm3sHoNIG5i/s+9Ho6Lj+GIw=="],
 
     "@opentui/core": ["@opentui/core@0.1.107", "", { "dependencies": { "bun-ffi-structs": "0.1.2", "diff": "8.0.2", "jimp": "1.6.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2", "yoga-layout": "3.2.1" }, "optionalDependencies": { "@dimforge/rapier2d-simd-compat": "^0.17.3", "@opentui/core-darwin-arm64": "0.1.107", "@opentui/core-darwin-x64": "0.1.107", "@opentui/core-linux-arm64": "0.1.107", "@opentui/core-linux-x64": "0.1.107", "@opentui/core-win32-arm64": "0.1.107", "@opentui/core-win32-x64": "0.1.107", "bun-webgpu": "0.1.7", "planck": "^1.4.2", "three": "0.177.0" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-gadu9EtNR+sOGyHN0buZryllavkWHRkCcX4yW/1ldp/l7HGS52hvkjYmo+74cuzUcfds/5Rbw2cgiy0Z7RxXmQ=="],
 
