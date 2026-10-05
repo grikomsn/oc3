@@ -84,6 +84,14 @@ jobs:
         run: |
           VERSION="${{ steps.release.outputs.version }}"
           mkdir -p dist npm-dist
+          # bun skips foreign-platform optional deps; the compile embeds each
+          # target's opentui native, so force-install all four before building.
+          OTUI_VERSION="$(node -p "require('./package.json').devDependencies['@opentui/core-darwin-arm64']")"
+          npm install --no-save --force \
+            "@opentui/core-darwin-arm64@${OTUI_VERSION}" \
+            "@opentui/core-darwin-x64@${OTUI_VERSION}" \
+            "@opentui/core-linux-x64@${OTUI_VERSION}" \
+            "@opentui/core-linux-arm64@${OTUI_VERSION}"
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             bun build ./src/cli.ts --compile --minify \
               --target="bun-${target}" \
@@ -92,7 +100,6 @@ jobs:
             tar -czf "dist/oc3-${VERSION}-${target}.tar.gz" -C dist "oc3-${target}"
             shasum -a 256 "dist/oc3-${VERSION}-${target}.tar.gz" >> dist/checksums.txt
           done
-          rm -f dist/oc3-darwin-arm64 dist/oc3-darwin-x64 dist/oc3-linux-x64 dist/oc3-linux-arm64
 
       - name: Prepare npm platform packages
         if: steps.release.outputs.release == 'true' || steps.release.outputs.publish == 'true'
@@ -107,9 +114,12 @@ jobs:
             pkg_dir="npm-dist/@nbrst/oc3-${target}"
             mkdir -p "$pkg_dir/bin"
             cp "dist/oc3-${target}" "$pkg_dir/bin/oc3"
-            sed -e "s/TEMPLATE/@nbrst\/oc3-${target}/" \
-                -e "s/TEMPLATE_OS/${os}/" \
+            # Order matters: replace TEMPLATE_OS/TEMPLATE_ARCH first, then the
+            # bare TEMPLATE (name + description) — otherwise the long tokens
+            # get mangled by the shorter pattern.
+            sed -e "s/TEMPLATE_OS/${os}/" \
                 -e "s/TEMPLATE_ARCH/${arch}/" \
+                -e "s/TEMPLATE/@nbrst\/oc3-${target}/" \
                 -e "s/0.0.1/${VERSION}/" \
                 npm/platform/package.json > "$pkg_dir/package.json"
             cp LICENSE "$pkg_dir/LICENSE"

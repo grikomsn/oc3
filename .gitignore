@@ -16,6 +16,7 @@ logs/
 
 # Build artifacts
 dist/
+npm-dist/
 *.tsbuildinfo
 
 # npm (bun.lock is authoritative; npm-generated package-lock.json is stale)

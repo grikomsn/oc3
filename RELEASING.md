@@ -2,21 +2,23 @@
 
 Releases are managed by Changesets and `.github/workflows/release.yml`.
 
-## One-time npm setup
+## npm setup (bootstrap complete)
 
-If `@nbrst/oc3` does not exist on npm yet, an owner must bootstrap `0.0.1` once from a trusted local checkout with `npm publish --access public`. A trusted publisher is configured from an existing package's npm settings.
+`@nbrst/oc3` and the four per-platform binary packages (`@nbrst/oc3-darwin-arm64`,
+`@nbrst/oc3-darwin-x64`, `@nbrst/oc3-linux-arm64`, `@nbrst/oc3-linux-x64`) are
+published (0.1.0 bootstrapped locally with `npm publish --no-provenance`).
 
-Then configure each package's npm trusted publisher with:
+To switch CI publishing to provenance (long-term): configure each package's npm
+trusted publisher with organization `nbrst`, repository `grikomsn/oc3`, workflow
+`release.yml`, and allowed action `npm publish`. No long-lived `NPM_TOKEN` is
+used by GitHub Actions; the release job receives `id-token: write` and publishes
+with npm 11.5.1 or newer. Until that is configured, CI publishing or the local
+flow (`npm publish --no-provenance`) still works without provenance.
 
-- Organization or user: `nbrst`
-- Repository: `grikomsn/oc3`
-- Workflow filename: `release.yml`
-- Environment: leave blank
-- Allowed action: `npm publish`
-
-Packages: `@nbrst/oc3` plus the per-platform binaries `@nbrst/oc3-darwin-arm64`, `@nbrst/oc3-darwin-x64`, `@nbrst/oc3-linux-arm64`, and `@nbrst/oc3-linux-x64`.
-
-No long-lived `NPM_TOKEN` is used by GitHub Actions. The release job runs on a GitHub-hosted runner, receives `id-token: write`, uses npm 11.5.1 or newer, and publishes with provenance.
+Also required for the changesets version-PR step: repository settings →
+Actions → General → "Allow GitHub Actions to create and approve pull requests".
+Until then, version bumps are done locally with `bun run version` and committed
+as `chore: version package`.
 
 ## Release flow
 
