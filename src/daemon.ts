@@ -64,12 +64,16 @@ export function serveLogPath(): string {
   return join(oc3Home(), "serve.log");
 }
 
-export function launchDetachedServe(cliEntry: string, port: number): number {
+/**
+ * Detached serve child. Dev runs spawn the bundled cli entry; compiled dist
+ * binaries re-exec themselves (their embedded entry boots unconditionally,
+ * and passing the bunfs entry path would land as the child's command).
+ */
+export function launchDetachedServe(cliEntry: string | undefined, port: number): number {
   const logFd = openSync(serveLogPath(), "a");
-  const child = spawn(process.execPath, [cliEntry, "serve", "--port", String(port)], {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-  });
+  const child = cliEntry
+    ? spawn(process.execPath, [cliEntry, "serve", "--port", String(port)], { detached: true, stdio: ["ignore", logFd, logFd] })
+    : spawn(process.execPath, ["serve", "--port", String(port)], { detached: true, stdio: ["ignore", logFd, logFd] });
   child.unref();
   return child.pid ?? 0;
 }

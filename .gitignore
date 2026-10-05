@@ -25,6 +25,7 @@ npm-debug.log*
 # misc junk
 *.orig
 .DS_Store?
+.pi/
 
 # Editor
 .vscode/

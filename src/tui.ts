@@ -15,9 +15,11 @@ import { writeCodexCatalog } from "./codex-catalog";
 import { launchChatGptDesktop, daemonRunning, readDaemonInfo, removeStaleDaemonFile, serveLogPath, stopDaemon } from "./daemon";
 import { applyCodexOverrides, overridesApplied, readBackup, restoreCodexOverrides } from "./codex-config";
 import { codexCatalogPath, loadKeys, loadState, saveKeys, saveState } from "./store";
-import { fetchGatewayUsage, gatewayKeyFor } from "./zen";
-import { displayName, providerLabel, sortModelsByGroup, type Oc3Model } from "./models";
+import { fetchGatewayUsage, gatewayKeyFor } from "./gateway";
+import { displayName, modeLabel, providerLabel, sortModelsByGroup, type Oc3Model } from "./models";
 import { startServer, type RequestRecord, type ServerHandle } from "./server";
+import { deviceSignIn } from "./signin";
+import type { ConsoleSession, OpenCodeMode } from "./protocol";
 
 interface TuiOptions {
   port: number;
@@ -26,7 +28,7 @@ interface TuiOptions {
   createRenderer?: typeof createCliRenderer;
 }
 
-type ViewId = "models" | "account" | "gateway" | "proxy" | "logs";
+type ViewId = "models" | "account" | "runtime";
 
 // Theme-following palette: terminal default fg/bg plus ANSI palette slots so
 // the TUI renders correctly under any terminal color scheme.
@@ -41,10 +43,16 @@ const THEME_ACTIVE = RGBA.fromIndex(15); // brightWhite — active tab
 const VIEWS: Array<{ id: ViewId; label: string }> = [
   { id: "models", label: "Models" },
   { id: "account", label: "Account" },
-  { id: "gateway", label: "Gateway" },
-  { id: "proxy", label: "Proxy" },
-  { id: "logs", label: "Logs" },
+  { id: "runtime", label: "Runtime" },
 ];
+
+const MODES: Array<OpenCodeMode> = ["console", "go"];
+
+const HINTS: Record<ViewId, string> = {
+  models: "j/k move · g/G ends · Enter default · r refresh · / filter · 1-9/arrows/tab views · ? · q",
+  account: "j/k slot · Enter orgs · l/x sign · z key · c clear · u quota · 1-9/arrows/tab views · ? · q",
+  runtime: "s server · e overrides · d desktop · r log · 1-9/arrows/tab views · ? · q",
+};
 
 // --- pure helpers (unit-tested) ---
 
@@ -162,7 +170,7 @@ function stringifyScalar(value: unknown): string {
 
 // --- shell ---
 
-export async function runTui(options: TuiOptions): Promise<void> {
+export async function runTui(options: TuiOptions): Promise<() => void> {
   const renderer = await (options.createRenderer ?? createCliRenderer)({ exitOnCtrlC: true });
   const auth = options.auth;
   const state = loadState<{ defaultModel?: string }>({});
@@ -193,7 +201,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   });
   renderer.root.add(root);
 
-  // Header: brand + account.
+  // Header: brand + per-slot account summary.
   const header = new BoxRenderable(renderer, { flexDirection: "column", paddingLeft: 1, paddingRight: 1 });
   const titleLine = new BoxRenderable(renderer, { flexDirection: "row", justifyContent: "space-between", width: "100%" });
   const title = new TextRenderable(renderer, { content: "oc3 — OpenCode Console proxy", fg: THEME_ACCENT });
@@ -205,8 +213,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
   // Tab strip: one TextRenderable per view for per-tab coloring.
   const tabRow = new BoxRenderable(renderer, { flexDirection: "row", width: "100%" });
   const tabs = new Map<ViewId, TextRenderable>();
-  for (let index = 0; index < VIEWS.length; index += 1) {
-    const view = VIEWS[index]!;
+  for (const view of VIEWS) {
     const tab = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
     tabs.set(view.id, tab);
     tabRow.add(tab);
@@ -276,7 +283,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
 
   function applyModelFilter(): void {
     const previous = visibleModels[modelSelect.getSelectedIndex() ?? 0]?.id;
-    visibleModels = filterModels(sortModelsByGroup(models), filterInput.value);
+    visibleModels = filterModels(models, filterInput.value);
     modelSelect.options = visibleModels.map((model) => ({
       name: `${model.id === state.defaultModel ? "● " : "  "}${displayName(model)}`,
       description: modelDescription(model),
@@ -316,10 +323,19 @@ export async function runTui(options: TuiOptions): Promise<void> {
     refreshStatus();
   }
 
-  // --- account view ---
+  // --- account view: one slot per mode (console / go) ---
+
   const accountView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
-  const accountInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
+  const slotSelect = new SelectRenderable(renderer, { flexGrow: 1, width: "100%", showDescription: true, showScrollIndicator: true });
   const orgSelect = new SelectRenderable(renderer, { flexGrow: 1, width: "100%", showDescription: true, showScrollIndicator: true });
+  const slotsInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
+  const quotaLabel = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
+  const editLabel = new TextRenderable(renderer, { content: "", fg: THEME_WARN });
+  const keyInput = new InputRenderable(renderer, {
+    placeholder: "press z on a slot to paste its service key…",
+    maxLength: 200,
+    width: "100%",
+  });
   const loginPanel = new BoxRenderable(renderer, { flexDirection: "column", backgroundColor: THEME_BG, width: "100%", paddingLeft: 1 });
   loginPanel.visible = false;
   const loginLines = [
@@ -328,178 +344,228 @@ export async function runTui(options: TuiOptions): Promise<void> {
     new TextRenderable(renderer, { content: "", fg: THEME_MUTED }),
   ];
   for (const line of loginLines) loginPanel.add(line);
-  accountView.add(accountInfo);
-  accountView.add(loginPanel);
+  orgSelect.visible = false;
+  keyInput.visible = false;
+  accountView.add(slotSelect);
   accountView.add(orgSelect);
+  accountView.add(loginPanel);
+  accountView.add(slotsInfo);
+  accountView.add(quotaLabel);
+  accountView.add(editLabel);
+  accountView.add(keyInput);
   content.add(accountView);
 
+  /** Which account view layer is active: the slot list or an org list. */
+  let accountLayer: "slots" | "orgs" = "slots";
+  let highlightedSlot: OpenCodeMode = "console";
   let orgs: Array<{ id: string; name: string }> = [];
   let loginActive = false;
+  let keyEdit: OpenCodeMode | undefined;
+
+  function slotSummary(mode: OpenCodeMode): { name: string; description: string } {
+    const session = auth.getSession(mode);
+    const keys = loadKeys();
+    const envKey = process.env.OPENCODE_API_KEY;
+    const fromEnv = !keys.console && !keys.go && envKey ? " (env)" : "";
+    if (!session) {
+      return {
+        name: keys[mode] || (envKey ? "env" : undefined)
+          ? `${modeLabel(mode)}: service key ${maskKey(keys[mode] ?? envKey)}${fromEnv}`
+          : `${modeLabel(mode)}: not signed in`,
+        description: "l: device sign-in · z: paste service key",
+      };
+    }
+    return {
+      name: `${modeLabel(mode)}: ${session.email} · ${session.orgName ?? session.orgId ?? "no org"}`,
+      description: `device session · ${session.orgs.length === 1 ? "1 org" : `${session.orgs.length} orgs`} · Enter: orgs · x: sign out`,
+    };
+  }
+
+  function activeSlot(): OpenCodeMode {
+    return MODES[slotSelect.getSelectedIndex() ?? 0] ?? "console";
+  }
+
+  function renderAccount(): void {
+    const keys = loadKeys();
+    const envKey = process.env.OPENCODE_API_KEY;
+    const fromEnv = !keys.console && !keys.go && envKey ? " (env)" : "";
+    slotsInfo.content = `service keys — console: ${maskKey(gatewayKeyFor("opencode", keys))}${fromEnv} · go: ${maskKey(gatewayKeyFor("opencode-go", keys))}${fromEnv} · stored in OC3_HOME (0600)`;
+    quotaLabel.content = auth.getSession("go") || keys.go || envKey
+      ? "Go quota — u refreshes (go slot):"
+      : "Go quota — no go credential yet (z/l on the go slot).";
+    if (accountLayer === "orgs") {
+      const session = auth.getSession(highlightedSlot);
+      orgs = session?.orgs ?? [];
+      orgSelect.options = orgs.map((org) => ({
+        name: `${org.id === session?.orgId ? "● " : "  "}${org.name}`,
+        description: org.id,
+        value: org.id,
+      }));
+      slotSelect.visible = false;
+      orgSelect.visible = true;
+    } else {
+      slotSelect.options = MODES.map((mode) => slotSummary(mode));
+      slotSelect.visible = true;
+      orgSelect.visible = false;
+    }
+    editLabel.content = keyEdit ? `→ pasting ${modeLabel(keyEdit)} service key (Enter saves, Esc cancels)…` : "";
+    keyInput.visible = keyEdit !== undefined;
+    refreshStatus();
+  }
+
+  slotSelect.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
+    highlightedSlot = MODES[index] ?? "console";
+    openOrgs();
+  });
 
   orgSelect.on(SelectRenderableEvents.ITEM_SELECTED, async (index: number) => {
     const org = orgs[index];
     if (!org) return;
     try {
-      await auth.selectOrganization(org.id);
-      statusLine = `Active org: ${org.name} (${org.id})`;
+      await auth.selectOrganization(org.id, highlightedSlot);
+      statusLine = `${modeLabel(highlightedSlot)} active org: ${org.name} (${org.id})`;
       await loadModels(false);
     } catch (error) {
       statusLine = `Org switch failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-    renderAccount();
-    refreshStatus();
+    closeOrgs();
   });
 
-  function renderAccount(): void {
-    const session = auth.getSession();
+  function openOrgs(): void {
+    const session = auth.getSession(highlightedSlot);
     if (!session) {
-      accountInfo.content = "Not signed in. Press l to sign in (device code).";
-      orgSelect.options = [];
-      orgs = [];
-    } else {
-      accountInfo.content = `Signed in: ${session.email}  ·  active org: ${session.orgName ?? session.orgId ?? "none"}  ·  server: ${session.server}`;
-      orgs = session.orgs;
-      orgSelect.options = orgs.map((org) => ({
-        name: `${org.id === session.orgId ? "● " : "  "}${org.name}`,
-        description: org.id,
-        value: org.id,
-      }));
+      statusLine = `${modeLabel(highlightedSlot)} is not signed in — press l on that slot first.`;
+      renderAccount();
+      return;
     }
-    refreshStatus();
+    orgs = session.orgs;
+    accountLayer = "orgs";
+    statusLine = `${modeLabel(highlightedSlot)} organizations — Enter switches, Esc returns.`;
+    renderAccount();
   }
 
-  async function startLogin(): Promise<void> {
+  function closeOrgs(): void {
+    accountLayer = "slots";
+    highlightedSlot = activeSlot();
+    renderAccount();
+  }
+
+  function startLogin(): void {
     if (loginActive) return;
+    const mode = activeSlot();
     loginActive = true;
     loginPanel.visible = true;
+    void runLogin(mode).catch(() => { /* tracked in statusLine */ });
+  }
+
+  async function runLogin(mode: OpenCodeMode): Promise<void> {
     try {
-      const device = await auth.requestDeviceCode();
-      loginLines[0]!.content = `Sign in: ${device.verificationUrl}`;
-      loginLines[1]!.content = `User code: ${device.userCode}`;
-      try {
-        const proc = Bun.spawn(["open", device.verificationUrl], { stdout: "ignore", stderr: "ignore" });
-        void proc.exited;
-      } catch { /* macOS only; the URL is shown above */ }
-      const session = await auth.completeDeviceSignIn(device, undefined, (seconds) => {
-        loginLines[2]!.content = `Waiting for authorization… ${seconds}s`;
+      await deviceSignIn(auth, mode, undefined, {
+        onDeviceCode: ({ userCode, verificationUrl }) => {
+          loginLines[0]!.content = `Sign in to OpenCode ${modeLabel(mode)}: ${verificationUrl}`;
+          loginLines[1]!.content = `User code: ${userCode}`;
+        },
+        onPoll: (seconds) => {
+          loginLines[2]!.content = `Waiting for authorization… ${seconds}s`;
+        },
       });
-      if (session.orgs.length > 1) {
-        statusLine = `Signed in as ${session.email}; ${session.orgs.length} orgs available — Enter to switch.`;
-      } else {
-        statusLine = `Signed in as ${session.email}.`;
-      }
+      const session = auth.getSession(mode);
+      statusLine = session
+        ? `Signed in to ${modeLabel(mode)} as ${session.email}${session.orgs.length > 1 ? ` (${session.orgs.length} orgs — Enter to switch).` : "."}`
+        : `Signed in to ${modeLabel(mode)}.`;
     } catch (error) {
       statusLine = `Sign-in failed: ${error instanceof Error ? error.message : String(error)}`;
     }
     loginActive = false;
     loginPanel.visible = false;
-    renderAccount();
     await loadModels(false);
-  }
-
-  function logout(): void {
-    auth.signOut();
-    statusLine = "Signed out.";
     renderAccount();
   }
 
-  // --- gateway view ---
-  const gatewayView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
-  const keysInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
-  const editLabel = new TextRenderable(renderer, { content: "", fg: THEME_WARN });
-  const keyInput = new InputRenderable(renderer, {
-    placeholder: "press z (zen) or g (go) to paste a key…",
-    maxLength: 200,
-    width: "100%",
-  });
-  const storedLabel = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
-  const usageBox = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%" });
-  const usageTitle = new TextRenderable(renderer, { content: "Go quota (u refreshes):", fg: THEME_TEXT });
-  const usageText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
-  usageBox.add(usageTitle);
-  usageBox.add(usageText);
-  gatewayView.add(keysInfo);
-  gatewayView.add(editLabel);
-  gatewayView.add(keyInput);
-  gatewayView.add(storedLabel);
-  gatewayView.add(usageBox);
-  content.add(gatewayView);
+  function signOutSlot(): void {
+    const mode = activeSlot();
+    auth.signOut(mode);
+    statusLine = `Signed out of ${modeLabel(mode)}.`;
+    renderAccount();
+  }
 
-  let gatewayEdit: "zen" | "go" | undefined;
-  let usageLoading = false;
+  function editServiceKey(): void {
+    if (keyEdit !== undefined) return;
+    const mode = activeSlot();
+    keyEdit = mode;
+    keyInput.value = "";
+    keyInput.placeholder = `paste ${mode} service key — Enter saves, Esc cancels…`;
+    focusLater(keyInput);
+    renderAccount();
+  }
 
   keyInput.on(InputRenderableEvents.ENTER, (value: string) => {
     const key = value.trim();
-    if (gatewayEdit && key) {
-      const target = gatewayEdit;
-      saveKeys({ ...loadKeys(), [target]: key });
-      statusLine = `${target === "zen" ? "Zen" : "Go"} key saved (${maskKey(key)}).`;
+    if (keyEdit && key) {
+      saveKeys({ ...loadKeys(), [keyEdit]: key });
+      statusLine = `${modeLabel(keyEdit)} key saved (${maskKey(key)}).`;
     }
-    cancelGatewayEdit();
-    renderGateway();
+    keyEdit = undefined;
+    keyInput.value = "";
+    keyInput.blur();
+    renderAccount();
   });
 
-  function editGatewayKey(target: "zen" | "go"): void {
-    gatewayEdit = target;
+  function cancelKeyEdit(): void {
+    keyEdit = undefined;
     keyInput.value = "";
-    keyInput.placeholder = `paste ${target} key — Enter saves, Esc cancels…`;
-    focusLater(keyInput);
-    renderGateway();
-  }
-
-  function switchGatewayEdit(): void {
-    editGatewayKey(gatewayEdit === "zen" ? "go" : "zen");
-  }
-
-  function cancelGatewayEdit(): void {
-    gatewayEdit = undefined;
-    keyInput.value = "";
-    keyInput.placeholder = "press z (zen) or g (go) to paste a key…";
+    keyInput.visible = false;
+    keyInput.placeholder = "press z on a slot to paste its service key…";
     keyInput.blur();
   }
 
-  function renderGateway(): void {
-    const keys = loadKeys();
-    const envKey = process.env.OPENCODE_API_KEY;
-    const fromEnv = !keys.zen && !keys.go && envKey ? " (env)" : "";
-    keysInfo.content = "gateway keys — get one at https://opencode.ai/auth · z: paste zen · g: paste go · tab: switch · enter: save · esc: cancel · c: clear all";
-    const show = (value: string | undefined) => maskKey(value);
-    storedLabel.content = `zen: ${show(gatewayKeyFor("opencode", keys))}${fromEnv}  ·  go: ${show(gatewayKeyFor("opencode-go", keys))}${fromEnv}  ·  stored in OC3_HOME/keys.json (0600)`;
-    editLabel.content = gatewayEdit
-      ? `→ pasting ${gatewayEdit.toUpperCase()} key  (current: ${show(gatewayEdit === "zen" ? keys.zen ?? keys.go ?? envKey : keys.go ?? keys.zen ?? envKey)})`
-      : "";
-    refreshStatus();
+  function clearServiceKey(): void {
+    const mode = activeSlot();
+    saveKeys({ ...loadKeys(), [mode]: undefined });
+    statusLine = `${modeLabel(mode)} service key cleared.`;
+    renderAccount();
   }
 
   async function loadUsage(): Promise<void> {
-    if (usageLoading) return;
-    const key = gatewayKeyFor("opencode-go", loadKeys());
-    if (!key) {
-      usageText.content = "No Go key configured — press g to set one.";
+    if (activeSlot() !== "go") {
+      statusLine = "Go quota applies to the go slot — j to move there, then u.";
+      renderAccount();
       return;
     }
-    usageLoading = true;
-    usageText.content = "Loading Go usage…";
+    quotaLabel.content = "Go quota: loading…";
+    refreshStatus();
+    const key = gatewayKeyFor("opencode-go", loadKeys()) || auth.getSession("go")?.accessToken;
+    if (!key) {
+      quotaLabel.content = "Go quota: no go credential yet (z/l on the go slot).";
+      return;
+    }
     try {
       const usage = await fetchGatewayUsage(key);
-      usageText.content = usageLines(usage).join("\n");
+      quotaLabel.content = `Go quota:\n${usageLines(usage).map((line) => `  ${line}`).join("\n")}`;
     } catch (error) {
-      usageText.content = `Usage lookup failed: ${error instanceof Error ? error.message : String(error)}`;
+      quotaLabel.content = `Go quota: lookup failed — ${error instanceof Error ? error.message : String(error)}`;
     }
-    usageLoading = false;
+    refreshStatus();
   }
 
-  // --- proxy view ---
-  const proxyView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
+  // --- runtime view: proxy + overrides + request feed + log tail ---
+
+  const runtimeView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
   const proxyInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
   const overridesInfo = new TextRenderable(renderer, { content: "", fg: THEME_TEXT });
   const requestsTitle = new TextRenderable(renderer, { content: "Recent /responses requests:", fg: THEME_TEXT });
   const requestsText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
-  proxyView.add(proxyInfo);
-  proxyView.add(overridesInfo);
-  proxyView.add(requestsTitle);
-  proxyView.add(requestsText);
-  content.add(proxyView);
+  const logsHint = new TextRenderable(renderer, { content: "serve.log tail (r reloads):", fg: THEME_MUTED });
+  const logsBox = new ScrollBoxRenderable(renderer, { flexGrow: 1, width: "100%", stickyScroll: true, stickyStart: "bottom", backgroundColor: THEME_BG });
+  const logsText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
+  logsBox.add(logsText);
+  runtimeView.add(proxyInfo);
+  runtimeView.add(overridesInfo);
+  runtimeView.add(requestsTitle);
+  runtimeView.add(requestsText);
+  runtimeView.add(logsHint);
+  runtimeView.add(logsBox);
+  content.add(runtimeView);
 
   function daemonState(): { running: boolean; port?: number; pid?: number } {
     removeStaleDaemonFile();
@@ -507,7 +573,11 @@ export async function runTui(options: TuiOptions): Promise<void> {
     return info && daemonRunning(info) ? { running: true, port: info.port, pid: info.pid } : { running: false };
   }
 
-  function renderProxy(): void {
+  function overrides() {
+    return { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${options.port}/v1` };
+  }
+
+  function renderRuntime(): void {
     const daemon = daemonState();
     const proxy = daemon.running
       ? `proxy: daemon on port ${daemon.port} (pid ${daemon.pid})`
@@ -517,14 +587,11 @@ export async function runTui(options: TuiOptions): Promise<void> {
     proxyInfo.content = proxy;
     const applied = overridesApplied(overrides());
     const backup = readBackup();
-    overridesInfo.content = `config: ${applied ? "overridden" : "original"} · backup: ${backup ? "present" : "none"} · s: server/daemon  e: overrides  d: boot ChatGPT desktop`;
+    overridesInfo.content = `config: ${applied ? "overridden" : "original"} · backup: ${backup ? "present" : "none"}`;
     const records = handle ? [...handle.recentRequests()].reverse().slice(0, 8) : [];
     requestsText.content = records.length ? records.map(formatRequestRecord).join("\n") : handle ? "(no requests yet)" : "(in-process server not running — attach state shown above)";
+    loadLogs();
     refreshStatus();
-  }
-
-  function overrides() {
-    return { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${options.port}/v1` };
   }
 
   async function toggleServer(): Promise<void> {
@@ -545,7 +612,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
         statusLine = `Server failed: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
-    renderProxy();
+    renderRuntime();
   }
 
   async function toggleOverrides(): Promise<void> {
@@ -560,7 +627,7 @@ export async function runTui(options: TuiOptions): Promise<void> {
     } catch (error) {
       statusLine = `Config toggle failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-    renderProxy();
+    renderRuntime();
   }
 
   function bootDesktop(): void {
@@ -569,25 +636,14 @@ export async function runTui(options: TuiOptions): Promise<void> {
     refreshStatus();
   }
 
-  // --- logs view ---
-  const logsView = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1 });
-  const logsHint = new TextRenderable(renderer, { content: "serve.log tail — r: reload", fg: THEME_MUTED });
-  const logsBox = new ScrollBoxRenderable(renderer, { flexGrow: 1, width: "100%", stickyScroll: true, stickyStart: "bottom", backgroundColor: THEME_BG });
-  const logsText = new TextRenderable(renderer, { content: "", fg: THEME_MUTED });
-  logsBox.add(logsText);
-  logsView.add(logsHint);
-  logsView.add(logsBox);
-  content.add(logsView);
-
   function loadLogs(): void {
     const path = serveLogPath();
-    const file = Bun.file(path);
-    file.text().then((content) => {
+    Bun.file(path).text().then((content) => {
       const lines = content.split("\n");
-      const tail = lines.slice(Math.max(0, lines.length - 300)).join("\n");
+      const tail = lines.slice(Math.max(0, lines.length - 120)).join("\n");
       logsText.content = tail || "(log file is empty)";
     }).catch(() => {
-      logsText.content = "No serve log yet. Start the daemon with `oc3 start`, or run the in-process server here (Proxy view, s).";
+      logsText.content = "(no serve log yet — s starts the in-process server)";
     });
   }
 
@@ -596,21 +652,17 @@ export async function runTui(options: TuiOptions): Promise<void> {
   function setView(next: ViewId): void {
     active = next;
     helpOpen = false;
+    helpBox.visible = false;
     modelsView.visible = next === "models";
     accountView.visible = next === "account";
-    gatewayView.visible = next === "gateway";
-    proxyView.visible = next === "proxy";
-    logsView.visible = next === "logs";
+    runtimeView.visible = next === "runtime";
     if (next === "account") renderAccount();
-    if (next === "gateway") { renderGateway(); void loadUsage(); }
-    if (next === "proxy") renderProxy();
-    if (next === "logs") loadLogs();
-    if (next !== "gateway" && gatewayEdit) {
-      cancelGatewayEdit();
-    }
+    if (next === "runtime") renderRuntime();
+    if (next !== "account" && keyEdit) cancelKeyEdit();
+    if (next !== "account" && accountLayer === "orgs") { accountLayer = "slots"; }
     if (next !== "models" && filterOpen) closeFilter(true);
     renderTabs();
-    refreshStatus();
+    if (next !== "runtime") refreshStatus();
   }
 
   function renderTabs(): void {
@@ -624,35 +676,29 @@ export async function runTui(options: TuiOptions): Promise<void> {
   }
 
   function refreshStatus(): void {
-    const session = auth.getSession();
-    accountBadge.content = session ? `${session.email} · ${session.orgName ?? session.orgId ?? "no org"}` : "not signed in";
+    const consoleSession = auth.getSession("console");
+    const goSession = auth.getSession("go");
+    const badge = (session: ConsoleSession | undefined, label: string): string =>
+      session ? `${label} ${session.orgName ?? session.orgId ?? "no org"}` : `${label} —`;
+    accountBadge.content = [badge(consoleSession, "console:"), badge(goSession, "go:")].join(" · ");
     status.content = statusLine;
-    const footers: Record<ViewId, string> = {
-      models: "j/k move · Enter set default · r refresh · / filter · [1-5] views · ? help · q quit",
-      account: "j/k move · Enter switch org · l sign in · x sign out · [1-5] views · ? help · q quit",
-      gateway: "z/g paste key · tab switch · Enter save · c clear · u quota · [1-5] views · ? help · q quit",
-      proxy: "s server/daemon · e overrides · d boot desktop · [1-5] views · ? help · q quit",
-      logs: "r reload · [1-5] views · ? help · q quit",
-    };
-    footer.content = footers[active];
+    footer.content = active === "account" && accountLayer === "orgs"
+      ? "j/k org · Enter switch · Esc slots · 1-9/arrows/tab views · ? · q"
+      : HINTS[active];
   }
 
   function toggleHelp(): void {
     helpOpen = !helpOpen;
-    if (helpOpen) {
-      statusLine = "";
-      helpBox.visible = true;
-      modelsView.visible = false;
-      accountView.visible = false;
-      gatewayView.visible = false;
-      proxyView.visible = false;
-      logsView.visible = false;
-    } else {
-      helpBox.visible = false;
-      setView(active);
+    helpBox.visible = helpOpen;
+    modelsView.visible = helpOpen ? false : active === "models";
+    accountView.visible = helpOpen ? false : active === "account";
+    runtimeView.visible = helpOpen ? false : active === "runtime";
+    if (!helpOpen) {
+      refreshStatus();
       return;
     }
-    refreshStatus();
+    status.content = "";
+    footer.content = "? or Esc close · tab/1-3 view · q quit";
   }
 
   const helpBox = new BoxRenderable(renderer, { flexDirection: "column", flexGrow: 1, width: "100%", paddingLeft: 1, gap: 1 });
@@ -660,61 +706,58 @@ export async function runTui(options: TuiOptions): Promise<void> {
   content.add(helpBox);
   helpBox.add(new TextRenderable(renderer, { content: "oc3 — keybindings", fg: THEME_ACCENT }));
   for (const line of [
-    "[1-5] or tab        switch views (Models, Account, Gateway, Proxy, Logs)",
+    "1-9, arrows, or tab switch views (Models, Account, Runtime)",
     "j / k               move selection (Shift for fast scroll)",
+    "g / G               jump to top / bottom of a list",
     "Enter               activate the highlighted item",
     "Models:  r refresh catalog · / filter models",
-    "Account: l device-code sign in · x sign out",
-    "Gateway: z/g edit zen/go key · c clear keys · u refresh Go quota",
-    "Proxy:   s toggle in-process server / stop daemon · e toggle config overrides · d boot ChatGPT desktop",
-    "Logs:    r reload serve.log tail",
+    "Account: l device-code sign in (highlighted slot) · x sign out · z paste service key · c clear key · u Go quota",
+    "Runtime: s toggle server/daemon · e config overrides · d boot ChatGPT desktop · r reload log tail",
     "?                  toggle this help",
-    "q or Esc           quit",
+    "q                  quit",
+    "Esc                close filter / input / help (no-op elsewhere)",
   ]) {
     helpBox.add(new TextRenderable(renderer, { content: line, fg: THEME_MUTED }));
   }
 
-  // Poll timers: proxy request feed, logs tail.
+  // Poll timers: runtime request feed + log tail. They self-clear once the
+  // renderer is gone (tests may destroy it directly).
   timers.push(setInterval(() => {
-    if (active === "proxy" && !helpOpen) renderProxy();
+    if (renderer.isDestroyed) { quit(); return; }
+    if (active === "runtime" && !helpOpen) renderRuntime();
   }, 1000));
-  timers.push(setInterval(() => {
-    if (active === "logs" && !helpOpen) loadLogs();
-  }, 2000));
+
+  function quit(): void {
+    for (const timer of timers) clearInterval(timer);
+    timers.length = 0;
+    for (const timer of focusTimers) clearTimeout(timer);
+    handle?.stop();
+    try { renderer.destroy(); } catch { /* already gone */ }
+  }
 
   renderer.keyInput.on("keypress", (key) => {
-    // Text inputs own the keyboard while open.
+    // Text inputs own the keyboard while open; up/down still moves the list.
     if (filterOpen) {
       if (key.name === "escape") closeFilter(true);
+      else if (key.name === "down") modelSelect.moveDown(key.shift ? 5 : 1);
+      else if (key.name === "up") modelSelect.moveUp(key.shift ? 5 : 1);
       return;
     }
-    if (gatewayEdit) {
+    if (keyEdit) {
       if (key.name === "escape") {
-        cancelGatewayEdit();
-        renderGateway();
+        cancelKeyEdit();
+        renderAccount();
       }
-      else if (key.name === "tab") switchGatewayEdit();
       return;
     }
     if (helpOpen) {
-      helpOpen = false;
-      helpBox.visible = false;
-      setView(active);
+      if (key.sequence === "?" || key.name === "escape") toggleHelp();
       return;
     }
-    if (key.name === "q") {
-      for (const timer of timers) clearInterval(timer);
-      for (const timer of focusTimers) clearTimeout(timer);
-      handle?.stop();
-      renderer.destroy();
-      return;
-    }
+    if (key.name === "q") { quit(); return; }
     if (key.name === "escape") {
-      // Esc on Models toggles help off / quits only via q; here: quit.
-      for (const timer of timers) clearInterval(timer);
-      for (const timer of focusTimers) clearTimeout(timer);
-      handle?.stop();
-      renderer.destroy();
+      // Esc closes modal layers only; q quits.
+      if (accountLayer === "orgs") { closeOrgs(); return; }
       return;
     }
     if (key.name === "tab") {
@@ -722,9 +765,15 @@ export async function runTui(options: TuiOptions): Promise<void> {
       setView(VIEWS[(index + 1) % VIEWS.length]!.id);
       return;
     }
-    const viewIndex = ["1", "2", "3", "4", "5"].indexOf(key.sequence ?? "");
-    if (viewIndex >= 0) {
-      setView(VIEWS[viewIndex]!.id);
+    if (key.name === "left" || key.name === "right") {
+      const index = VIEWS.findIndex((view) => view.id === active);
+      const step = key.name === "right" ? 1 : VIEWS.length - 1;
+      setView(VIEWS[(index + step) % VIEWS.length]!.id);
+      return;
+    }
+    if (/^[1-9]$/.test(key.sequence ?? "")) {
+      const viewIndex = Number(key.sequence) - 1;
+      if (viewIndex < VIEWS.length) setView(VIEWS[viewIndex]!.id);
       return;
     }
     if (key.name === "?" || key.sequence === "?") {
@@ -743,38 +792,27 @@ export async function runTui(options: TuiOptions): Promise<void> {
         return;
       }
       case "account": {
-        if (key.name === "down" || key.name === "j") { orgSelect.moveDown(); return; }
-        if (key.name === "up" || key.name === "k") { orgSelect.moveUp(); return; }
-        if (key.name === "return" || key.name === "enter") { orgSelect.selectCurrent(); return; }
-        if (key.name === "l") { void startLogin(); return; }
-        if (key.name === "x") { logout(); return; }
-        return;
-      }
-      case "gateway": {
-        if (key.name === "z") { editGatewayKey("zen"); return; }
-        if (key.name === "g") { editGatewayKey("go"); return; }
-        if (key.name === "c") { clearGatewayKey(); return; }
+        const list = accountLayer === "orgs" ? orgSelect : slotSelect;
+        if (key.name === "down" || key.name === "j") { list.moveDown(); return; }
+        if (key.name === "up" || key.name === "k") { list.moveUp(); return; }
+        if (key.name === "return" || key.name === "enter") { list.selectCurrent(); return; }
+        if (accountLayer === "orgs") { closeOrgs(); return; }
+        if (key.name === "l") { startLogin(); return; }
+        if (key.name === "x") { signOutSlot(); return; }
+        if (key.name === "z") { editServiceKey(); return; }
+        if (key.name === "c") { clearServiceKey(); return; }
         if (key.name === "u") { void loadUsage(); return; }
         return;
       }
-      case "proxy": {
+      case "runtime": {
         if (key.name === "s") { void toggleServer(); return; }
         if (key.name === "e") { void toggleOverrides(); return; }
         if (key.name === "d") { bootDesktop(); return; }
-        return;
-      }
-      case "logs": {
         if (key.name === "r") { loadLogs(); return; }
         return;
       }
     }
   });
-
-  function clearGatewayKey(): void {
-    saveKeys({});
-    statusLine = "Stored gateway keys cleared.";
-    renderGateway();
-  }
 
   // Boot: load models, attach to or start the proxy, land on Models.
   await loadModels(false);
@@ -791,4 +829,9 @@ export async function runTui(options: TuiOptions): Promise<void> {
   }
   renderTabs();
   setView("models");
+
+  /** Stops timers/servers and destroys the renderer; safe to call twice. */
+  return () => {
+    quit();
+  };
 }

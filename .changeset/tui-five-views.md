@@ -1,5 +1,5 @@
 ---
-"oc3": minor
+"@nbrst/oc3": minor
 ---
 
 TUI overhaul: the dashboard is now five views instead of a single model list.

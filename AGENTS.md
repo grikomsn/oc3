@@ -7,7 +7,7 @@ OpenCode Console models. It exposes an OpenAI Responses-API endpoint, translates
 to whatever the Console model speaks, and manages config overrides for Codex.
 
 - Bun + TypeScript. Node.js 24 is only needed for npm scripts.
-- State lives in `~/.config/oc3`: `session.json` (Console OAuth, 0600), `keys.json` (Zen/Go API keys, 0600), and the sectioned `models.json` cache. Never commit them.
+- State lives in `~/.config/oc3`: `session.json` (Console OAuth, 0600), `keys.json` (per-mode OpenCode service keys `console`/`go`, 0600, legacy `zen` slot migrated on load), and the sectioned `models.json` cache (v3: console/go). Never commit them.
 - The Codex config profile is written under `[profiles.oc3]` + `[model_providers.oc3]`;
   top-level `~/.codex/config.toml` values are only touched by the
   backup/restore in `start`/`stop`.
@@ -19,8 +19,9 @@ to whatever the Console model speaks, and manages config overrides for Codex.
 - `src/translate.ts`: Responses ⇄ Chat Completions translation and the `EmittedEvent` contract (strict usage details, stop reasons, tool-call items).
 - `src/desktop-normalize.ts`: ChatGPT-desktop request normalization (routing catalog thinking, auto-review alias, Full-Access exec, custom tool calls).
 - `src/auth.ts`: device-code OAuth, single-flight refresh, org selection.
-- `src/console.ts` / `src/models.ts`: model catalog cache (sectioned console/zen/go), per-model metadata (endpoint kinds, reasoning efforts, cost, backend groups/labels).
-- `src/zen.ts` / `src/credentials.ts`: OpenCode gateway (Zen/Go) catalogs and per-model credential routing (native OpenAI keys, gateway API keys, Console OAuth sessions).
+- `src/console.ts` / `src/models.ts`: model catalog cache (v3: console/go sections with credential-kind-aware discovery), per-model metadata (endpoint kinds, reasoning efforts, cost, backend groups/labels).
+- `src/gateway.ts` / `src/credentials.ts`: OpenCode gateway (Console/Go) catalogs and per-model credential routing — per-mode service keys take precedence over the shared Console device session, with the anonymous public sentinel for free models.
+- `src/zen.ts` removed (module is `src/gateway.ts`); the `/zen/v1` and `/zen/go/v1` URL paths are upstream-owned and unchanged.
 - `src/codex-catalog.ts` / `src/routing-catalog.ts`: Codex picker catalog (per-model reasoning levels, backend labels) and thinking-metadata routing file.
 - `src/routing-catalog.ts` / `src/reasoning.ts`: thinking metadata and per-family effort wire formats.
 - `src/repair.ts`: schema-aware tool-argument coercion and apply_patch envelope repair.

@@ -5,14 +5,20 @@ import {
   type ConsoleOrg,
   type ConsoleSession,
   type DeviceCode,
+  type OpenCodeMode,
 } from "./protocol";
-import { clearSession, loadSession, saveSession } from "./store";
+import { clearModeSession, loadSessions, saveModeSession } from "./store";
 
 type Fetcher = typeof fetch;
 type Sleeper = (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 
+/**
+ * OpenCode device-code auth with per-mode slots: a console slot (account/org
+ * A drives Console) and a go slot (account/org B drives the subscription).
+ * Both slots store Console-shaped sessions; go sign-out never touches console.
+ */
 export class OpenCodeAuth {
-  private refreshPromise: { identity: string; promise: Promise<ConsoleSession> } | undefined;
+  private refreshPromises = new Map<OpenCodeMode, { identity: string; promise: Promise<ConsoleSession> }>();
 
   constructor(
     private readonly fetcher: Fetcher = fetch,
@@ -20,20 +26,21 @@ export class OpenCodeAuth {
     private readonly sleep: Sleeper = delay,
   ) {}
 
-  getSession(): ConsoleSession | undefined {
-    return loadSession();
+  getSession(mode: OpenCodeMode): ConsoleSession | undefined {
+    return loadSessions()[mode];
   }
 
-  isSignedIn(): boolean {
-    return this.getSession() !== undefined;
+  isSignedIn(mode?: OpenCodeMode): boolean {
+    if (mode) return this.getSession(mode) !== undefined;
+    return (this.getSession("console") ?? this.getSession("go")) !== undefined;
   }
 
-  async getCredential(): Promise<{ token: string; server: string; orgId?: string; orgName?: string }> {
-    const session = this.getSession();
-    if (!session) throw new Error("Not signed in. Run: oc3 login");
+  async getCredential(mode: OpenCodeMode): Promise<{ token: string; server: string; orgId?: string; orgName?: string }> {
+    const session = this.getSession(mode);
+    if (!session) throw new Error(`Not signed in to OpenCode ${mode}. Run: oc3 login --mode ${mode}`);
     const fresh = session.expiresAt > this.now() + 5 * 60_000
       ? session
-      : await this.refresh(session);
+      : await this.refresh(mode, session);
     return { token: fresh.accessToken, server: fresh.server, orgId: fresh.orgId, orgName: fresh.orgName };
   }
 
@@ -60,7 +67,7 @@ export class OpenCodeAuth {
     };
   }
 
-  async completeDeviceSignIn(device: DeviceCode, signal?: AbortSignal, onPoll?: (elapsedSeconds: number) => void): Promise<ConsoleSession> {
+  async completeDeviceSignIn(device: DeviceCode, mode: OpenCodeMode, signal?: AbortSignal, onPoll?: (elapsedSeconds: number) => void): Promise<ConsoleSession> {
     let intervalMs = device.intervalMs;
     const startedAt = this.now();
     while (this.now() < device.expiresAt) {
@@ -104,49 +111,51 @@ export class OpenCodeAuth {
         orgs,
         ...(orgs[0] ? { orgId: orgs[0].id, orgName: orgs[0].name } : {}),
       };
-      saveSession(session);
+      saveModeSession(mode, session);
       return session;
     }
     throw new Error("OpenCode Console device code expired; start sign-in again");
   }
 
-  async refresh(session?: ConsoleSession): Promise<ConsoleSession> {
-    const current = session ?? this.getSession();
-    if (!current) throw new Error("Not signed in. Run: oc3 login");
+  private async refresh(mode: OpenCodeMode, session?: ConsoleSession): Promise<ConsoleSession> {
+    const current = session ?? this.getSession(mode);
+    if (!current) throw new Error(`Not signed in to OpenCode ${mode}. Run: oc3 login --mode ${mode}`);
     const identity = `${current.accessToken}\u0000${current.refreshToken}\u0000${current.expiresAt}`;
-    if (this.refreshPromise && this.refreshPromise.identity === identity) return this.refreshPromise.promise;
+    const existing = this.refreshPromises.get(mode);
+    if (existing?.identity === identity) return existing.promise;
     const promise = (async (): Promise<ConsoleSession> => {
       const response = await this.fetcher(`${current.server}/auth/device/token`, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify({ grant_type: "refresh_token", refresh_token: current.refreshToken, client_id: OPENCODE_CLIENT_ID }),
       });
-      if (!response.ok) throw new Error(`OpenCode Console token refresh failed (${response.status})`);
+      if (!response.ok) throw new Error(`OpenCode ${mode} token refresh failed (${response.status})`);
       const value = await response.json() as Record<string, unknown>;
       const accessToken = str(value.access_token);
-      if (!accessToken) throw new Error("OpenCode Console token refresh returned no access token");
+      if (!accessToken) throw new Error(`OpenCode ${mode} token refresh returned no access token`);
       const next: ConsoleSession = {
         ...current,
         accessToken,
         refreshToken: str(value.refresh_token) ?? current.refreshToken,
         expiresAt: this.now() + positiveNumber(value.expires_in, 3600) * 1000,
       };
-      saveSession(next);
+      const stored = loadSessions()[mode];
+      if (stored && stored.refreshToken === current.refreshToken) saveModeSession(mode, next);
       return next;
     })().finally(() => {
-      if (this.refreshPromise?.promise === promise) this.refreshPromise = undefined;
+      if (this.refreshPromises.get(mode)?.promise === promise) this.refreshPromises.delete(mode);
     });
-    this.refreshPromise = { identity, promise };
+    this.refreshPromises.set(mode, { identity, promise });
     return promise;
   }
 
-  async selectOrganization(orgId: string): Promise<ConsoleSession> {
-    const session = this.getSession();
-    if (!session) throw new Error("Not signed in. Run: oc3 login");
+  async selectOrganization(orgId: string, mode: OpenCodeMode): Promise<ConsoleSession> {
+    const session = this.getSession(mode);
+    if (!session) throw new Error(`Not signed in to OpenCode ${mode}. Run: oc3 login --mode ${mode}`);
     const match = session.orgs.find((org) => org.id === orgId);
     if (!match) throw new Error(`Organization ${orgId} is not available to this account`);
     const next = { ...session, orgId: match.id, orgName: match.name };
-    saveSession(next);
+    saveModeSession(mode, next);
     return next;
   }
 
@@ -155,8 +164,9 @@ export class OpenCodeAuth {
     return normalizeOrganizations(value);
   }
 
-  signOut(): void {
-    clearSession();
+  /** Clears one mode's slot; the other mode's session is preserved. */
+  signOut(mode: OpenCodeMode): void {
+    clearModeSession(mode);
   }
 
   private async getJson(server: string, path: string, token: string): Promise<unknown> {

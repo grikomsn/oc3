@@ -1,10 +1,11 @@
-import { modelsFromConsoleConfig, nativeChatGptModels, nativeOpenAiModels, sortModelsByGroup, type Oc3Model } from "./models";
 import { loadCatalogCache, saveCatalogSection } from "./store";
-import { fetchGatewayModels } from "./zen";
+import { fetchGatewayModels, freeConsoleModels } from "./gateway";
+import { discoveryTokens } from "./credentials";
+import { modelsFromConsoleConfig, nativeChatGptModels, nativeOpenAiModels, sortModelsByGroup, type Oc3Model } from "./models";
 import type { OpenCodeAuth } from "./auth";
 
 export async function loadConsoleModels(auth: OpenCodeAuth): Promise<Oc3Model[]> {
-  const { token, server, orgId } = await auth.getCredential();
+  const { token, server, orgId } = await auth.getCredential("console");
   if (!orgId) throw new Error("No organization selected. Run: oc3 org");
   const serverBase = server.replace(/\/+$/, "");
   const response = await fetch(`${serverBase}/api/config`, {
@@ -25,7 +26,6 @@ export function availableModels(): Oc3Model[] {
   const openAi = process.env.OPENAI_API_KEY ? nativeOpenAiModels() : [];
   return sortModelsByGroup([
     ...cache.console as Oc3Model[],
-    ...cache.zen as Oc3Model[],
     ...cache.go as Oc3Model[],
     ...chatGpt,
     ...openAi,
@@ -40,18 +40,28 @@ export interface RefreshResult {
 export async function refreshModels(auth: OpenCodeAuth): Promise<RefreshResult> {
   const errors: string[] = [];
   let consoleModels: Oc3Model[] = [];
-  if (auth.isSignedIn()) {
+  if (auth.isSignedIn("console")) {
     try {
       consoleModels = await loadConsoleModels(auth);
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }
-  const refreshed = await refreshGatewayCatalogs();
+  // Gateway discovery carries the credential of each slot — the same
+  // key > slot-session precedence as request routing, in one place.
+  const { consoleToken, goToken } = await discoveryTokens(auth);
+  const refreshed = await refreshGatewayCatalogs({
+    skipConsole: auth.isSignedIn("console"),
+    consoleToken,
+    goToken,
+  });
   errors.push(...refreshed.errors);
+  // A signed-in session replaces the public Console discovery with the org
+  // catalog; on org fetch failure the cached section keeps serving.
+  const cache = loadCatalogCache();
+  const consoleList = consoleModels.length ? consoleModels : cache.console as Oc3Model[];
   const models = sortModelsByGroup([
-    ...consoleModels,
-    ...refreshed.zen,
+    ...consoleList,
     ...refreshed.go,
     ...nativeChatGptModels(),
     ...(process.env.OPENAI_API_KEY ? nativeOpenAiModels() : []),
@@ -59,12 +69,23 @@ export async function refreshModels(auth: OpenCodeAuth): Promise<RefreshResult> 
   return { models, errors };
 }
 
-export async function refreshGatewayCatalogs(): Promise<{ zen: Oc3Model[]; go: Oc3Model[]; errors: string[] }> {
+/**
+ * Public gateway discovery (Console /models + Go /models). A token (service
+ * key or the shared Console session) rides along as Bearer. When a Console
+ * session provides the org-scoped catalog, the public Console list is
+ * superseded and skipped; Go discovery is always public and unfiltered.
+ */
+export async function refreshGatewayCatalogs(options: { skipConsole?: boolean; consoleToken?: string; goToken?: string } = {}): Promise<{ console: Oc3Model[]; go: Oc3Model[]; errors: string[] }> {
   const errors: string[] = [];
-  const [zen, go] = await Promise.all([fetchGatewayModels("zen"), fetchGatewayModels("go")]);
-  if (zen) saveCatalogSection("zen", zen);
-  else errors.push("Zen catalog unreachable; keeping cached models");
+  const [console, go] = await Promise.all([
+    options.skipConsole ? Promise.resolve(undefined) : fetchGatewayModels("console", options.consoleToken),
+    fetchGatewayModels("go", options.goToken),
+  ]);
+  // Anonymous Console discovery mirrors upstream: paid models stay hidden.
+  const consoleModels = console && !options.consoleToken ? freeConsoleModels(console) : console;
+  if (consoleModels) saveCatalogSection("console", consoleModels);
+  else if (!options.skipConsole) errors.push("Console catalog unreachable; keeping cached models");
   if (go) saveCatalogSection("go", go);
   else errors.push("Go catalog unreachable; keeping cached models");
-  return { zen: zen ?? [], go: go ?? [], errors };
+  return { console: consoleModels ?? [], go: go ?? [], errors };
 }

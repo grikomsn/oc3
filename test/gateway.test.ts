@@ -2,33 +2,38 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
-import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection } from "../src/store";
+import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection, clearModeSession, saveModeSession } from "../src/store";
 import { displayName, findModel, modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, reasoningEffortsFromSource, type ProviderSource } from "../src/models";
 import { writeCodexCatalog } from "../src/codex-catalog";
 import { credentialForModel, credentialErrorHint } from "../src/credentials";
-import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayResponsesExtras } from "../src/zen";
+import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayResponsesExtras } from "../src/gateway";
+import { envSaver, sessionFixture, writeLegacySession } from "./helpers";
+import type { ConsoleSession } from "../src/protocol";
 import type { Oc3Model } from "../src/models";
 
-const HOME = "/tmp/oc3-zen-test";
+const HOME = "/tmp/oc3-gateway-test";
 const PROXY_PORT = 8894;
-const ZEN_PORT = 8901;
+const CONSOLE_PORT = 8901;
 const GO_PORT = 8902;
 const CATALOG_PORT = 8903;
 
-const zenRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
+const consoleRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
 const goRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
+const consoleModelAuths: Array<string | undefined> = [];
+const goModelAuths: Array<string | undefined> = [];
 
-const zenUpstream = Bun.serve({
+const consoleUpstream = Bun.serve({
   hostname: "127.0.0.1",
-  port: ZEN_PORT,
+  port: CONSOLE_PORT,
   async fetch(request) {
     const url = new URL(request.url);
     const headers = Object.fromEntries(request.headers.entries());
     if (url.pathname === "/v1/models") {
-      return Response.json({ object: "list", data: [{ id: "opencode/gpt-model" }, { id: "opencode/gemini-flash" }] });
+      consoleModelAuths.push(headers.authorization);
+      return Response.json({ object: "list", data: [{ id: "opencode/gpt-model" }, { id: "opencode/gemini-flash" }, { id: "opencode/expensive-luxury" }] });
     }
     if (url.pathname.endsWith("/responses")) {
-      zenRequests.push({ url: url.href, headers, body: await request.json() as Record<string, unknown> });
+      consoleRequests.push({ url: url.href, headers, body: await request.json() as Record<string, unknown> });
       const stream = new ReadableStream({
         start(controller) {
           const enc = new TextEncoder();
@@ -51,7 +56,8 @@ const goUpstream = Bun.serve({
     const headers = Object.fromEntries(request.headers.entries());
     const pathname = new URL(request.url).pathname;
     if (pathname === "/v1/models") {
-      return Response.json({ object: "list", data: [{ id: "minimax-m3" }] });
+      goModelAuths.push(headers.authorization);
+      return Response.json({ object: "list", data: [{ id: "minimax-m3" }, { id: "paid-go" }] });
     }
     if (pathname === "/v1/usage") {
       return Response.json({ usage: { rolling: { percent: 12 }, weekly: { percent: 4 }, monthly: { percent: 1 } } });
@@ -78,7 +84,7 @@ const catalogUpstream = Bun.serve({
     if (new URL(request.url).pathname === "/api.json") {
       return Response.json({
         providers: {
-          opencode: zenCatalogProvider,
+          opencode: consoleCatalogProvider,
           "opencode-go": goCatalogProvider,
         },
       });
@@ -87,15 +93,15 @@ const catalogUpstream = Bun.serve({
   },
 });
 
-const zenCatalogProvider: ProviderSource = {
+const consoleCatalogProvider: ProviderSource = {
   id: "opencode",
-  name: "OpenCode Zen",
-  api: `http://127.0.0.1:${ZEN_PORT}/v1`,
+  name: "OpenCode Console",
+  api: `http://127.0.0.1:${CONSOLE_PORT}/v1`,
   npm: "@ai-sdk/openai-compatible",
   models: {
     "gpt-model": {
       id: "gpt-model",
-      name: "GPT via Zen",
+      name: "GPT via Console",
       reasoning: true,
       tool_call: true,
       attachment: true,
@@ -105,12 +111,13 @@ const zenCatalogProvider: ProviderSource = {
       cost: { input: 1.5, output: 10, context_over_200k: 3 },
     },
     "gemini-flash": {
-      name: "Gemini via Zen",
+      name: "Gemini via Console",
       reasoning: true,
       tool_call: true,
       limit: { context: 1000000, output: 64000 },
       provider: { npm: "@ai-sdk/google" },
     },
+    "expensive-luxury": { name: "Expensive Luxury", cost: { input: 9, output: 90 } },
     "paid-model": { name: "Paid", status: "deprecated" },
   },
 };
@@ -120,6 +127,7 @@ const goCatalogProvider: ProviderSource = {
   npm: "@ai-sdk/openai-compatible",
   models: {
     "minimax-m3": { name: "MiniMax via Go", reasoning: true, tool_call: true, limit: { context: 200000, output: 32000 } },
+    "paid-go": { name: "Paid Go", cost: { input: 2, output: 20 } },
   },
 };
 
@@ -128,14 +136,14 @@ function gatewayModel(overrides: Partial<Oc3Model>): Oc3Model {
     id: "opencode/gpt-model",
     rawModelId: "gpt-model",
     providerId: "opencode",
-    name: "GPT via Zen",
+    name: "GPT via Console",
     contextLength: 400000,
     maxOutputTokens: 128000,
     reasoning: true,
     imageInput: true,
     toolCalling: true,
     endpoint: "responses",
-    baseUrl: `http://127.0.0.1:${ZEN_PORT}/v1`,
+    baseUrl: `http://127.0.0.1:${CONSOLE_PORT}/v1`,
     source: "gateway",
     ...overrides,
   };
@@ -150,18 +158,13 @@ async function postResponses(port: number, body: Record<string, unknown>): Promi
 }
 
 const auth = new OpenCodeAuth();
-const savedEnv: Record<string, string | undefined> = {};
-
-function setEnv(key: string, value: string | undefined): void {
-  savedEnv[key] = process.env[key];
-  if (value === undefined) delete process.env[key];
-  else process.env[key] = value;
-}
+const env = envSaver();
+const setEnv = env.set;
 
 beforeAll(() => {
   setEnv("OC3_HOME", `${HOME}/.config/oc3`);
   mkdirSync(`${HOME}/.config/oc3`, { recursive: true });
-  setEnv("OC3_ZEN_BASE_URL", `http://127.0.0.1:${ZEN_PORT}/v1`);
+  setEnv("OC3_CONSOLE_BASE_URL", `http://127.0.0.1:${CONSOLE_PORT}/v1`);
   setEnv("OC3_GO_BASE_URL", `http://127.0.0.1:${GO_PORT}/v1`);
   setEnv("OC3_GATEWAY_CATALOG_URL", `http://127.0.0.1:${CATALOG_PORT}/api.json`);
   setEnv("OPENCODE_API_KEY", undefined);
@@ -169,26 +172,23 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  zenUpstream.stop(true);
+  consoleUpstream.stop(true);
   goUpstream.stop(true);
   catalogUpstream.stop(true);
   rmSync(HOME, { recursive: true, force: true });
-  for (const [key, value] of Object.entries(savedEnv)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
+  env.restore();
 });
 
 describe("gateway catalog parsing", () => {
   test("modelsFromGatewayProvider namespaces ids and resolves per-mode endpoints", () => {
-    const zen = modelsFromGatewayProvider("opencode", zenCatalogProvider, "zen");
-    const ids = zen.map((model) => model.id);
-    expect(ids).toEqual(["opencode/gpt-model", "opencode/gemini-flash"]);
-    expect(zen[0]!.endpoint).toBe("responses");
-    expect(zen[0]!.baseUrl).toBe(`http://127.0.0.1:${ZEN_PORT}/v1`);
-    expect(zen[0]!.imageInput).toBe(true);
-    expect(zen[1]!.endpoint).toBe("google");
-    expect(zen.map((model) => model.rawModelId)).not.toContain("paid-model");
+    const console = modelsFromGatewayProvider("opencode", consoleCatalogProvider, "console");
+    const ids = console.map((model) => model.id);
+    expect(ids).toEqual(["opencode/gpt-model", "opencode/gemini-flash", "opencode/expensive-luxury"]);
+    expect(console[0]!.endpoint).toBe("responses");
+    expect(console[0]!.baseUrl).toBe(`http://127.0.0.1:${CONSOLE_PORT}/v1`);
+    expect(console[0]!.imageInput).toBe(true);
+    expect(console[1]!.endpoint).toBe("google");
+    expect(console.map((model) => model.rawModelId)).not.toContain("paid-model");
 
     const go = modelsFromGatewayProvider("opencode-go", goCatalogProvider, "go");
     expect(go[0]!.id).toBe("opencode-go/minimax-m3");
@@ -196,11 +196,11 @@ describe("gateway catalog parsing", () => {
   });
 
   test("carries catalog reasoning efforts and cost metadata", () => {
-    const zen = modelsFromGatewayProvider("opencode", zenCatalogProvider, "zen");
-    const gpt = zen.find((model) => model.rawModelId === "gpt-model")!;
+    const console = modelsFromGatewayProvider("opencode", consoleCatalogProvider, "console");
+    const gpt = console.find((model) => model.rawModelId === "gpt-model")!;
     expect(gpt.reasoningEfforts).toEqual(["low", "high"]);
     expect(gpt.cost).toEqual({ input: 1.5, output: 10, inputOver200k: 3 });
-    const gemini = zen.find((model) => model.rawModelId === "gemini-flash")!;
+    const gemini = console.find((model) => model.rawModelId === "gemini-flash")!;
     expect(gemini.reasoningEfforts).toBeUndefined();
     expect(gemini.cost).toBeUndefined();
   });
@@ -211,13 +211,13 @@ describe("gateway catalog parsing", () => {
   });
 
   test("codex catalog derives per-model reasoning levels and routing metadata", async () => {
-    const zen = modelsFromGatewayProvider("opencode", zenCatalogProvider, "zen");
-    await writeCodexCatalog(zen);
+    const console = modelsFromGatewayProvider("opencode", consoleCatalogProvider, "console");
+    await writeCodexCatalog(console);
     const codex = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-models.json`, "utf8")) as {
       models: Array<{ slug: string; display_name: string; supported_reasoning_levels: Array<{ effort: string }>; default_reasoning_level: string }>;
     };
     const gptEntry = codex.models.find((model) => model.slug === "opencode/gpt-model")!;
-    expect(gptEntry.display_name).toBe("GPT via Zen [Zen]");
+    expect(gptEntry.display_name).toBe("GPT via Console [Console]");
     expect(gptEntry.supported_reasoning_levels.map((level) => level.effort)).toEqual(["low", "high"]);
     expect(gptEntry.default_reasoning_level).toBe("low");
     const routing = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-routing.json`, "utf8")) as {
@@ -228,7 +228,7 @@ describe("gateway catalog parsing", () => {
   });
 
   test("minimalGatewayModel applies heuristic endpoint kinds", () => {
-    const claude = minimalGatewayModel("opencode", "zen", "claude-sonnet-5");
+    const claude = minimalGatewayModel("opencode", "console", "claude-sonnet-5");
     expect(claude.endpoint).toBe("messages");
     expect(claude.id).toBe("opencode/claude-sonnet-5");
     expect(claude.baseUrl).toContain("opencode.ai/zen/v1");
@@ -263,13 +263,14 @@ describe("gateway wire parity", () => {
 });
 
 describe("gateway credential routing", () => {
-  test("prefers stored keys over the environment and falls back to public", async () => {
-    saveKeys({ zen: "zen-key-123", go: "go-key-456" });
+  test("per-mode service keys authorize their own provider only", async () => {
+    saveKeys({ console: "console-key-123", go: "go-key-456" });
     setEnv("OPENCODE_API_KEY", "env-key");
-    expect(await tokenFor(gatewayModel({ providerId: "opencode" }))).toBe("zen-key-123");
+    expect(await tokenFor(gatewayModel({ providerId: "opencode" }))).toBe("console-key-123");
     expect(await tokenFor(gatewayModel({ providerId: "opencode-go" }))).toBe("go-key-456");
-    saveKeys({ zen: "zen-key-123" });
-    expect(await tokenFor(gatewayModel({ providerId: "opencode-go" }))).toBe("zen-key-123");
+    saveKeys({ console: "console-key-123" });
+    // no cross-mode fallback: the console key must not authorize Go
+    expect(await tokenFor(gatewayModel({ providerId: "opencode-go" }))).toBe("env-key");
     clearKeys();
     expect(await tokenFor(gatewayModel({ providerId: "opencode" }))).toBe("env-key");
     setEnv("OPENCODE_API_KEY", undefined);
@@ -291,6 +292,7 @@ describe("gateway credential routing", () => {
     expect(consoleOrigin?.orgId).toBe("org-1");
     expect(credentialErrorHint(gatewayModel({ source: "console" }))).toBe("Not signed in. Run: oc3 login");
     expect(credentialErrorHint(gatewayModel({ source: "gateway" }))).toContain("oc3 keys --set");
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
     rmSync(`${process.env.OC3_HOME}/session.json`);
   });
 
@@ -304,33 +306,75 @@ describe("gateway credential routing", () => {
   });
 });
 
+describe("dual auth precedence", () => {
+  test("service keys take precedence over the shared Console session", async () => {
+    saveKeys({ console: "console-key-priority", go: "go-key-priority" });
+    writeSession("session-token");
+    expect(await tokenFor(gatewayModel({}))).toBe("console-key-priority");
+    expect(await tokenFor(gatewayModel({ providerId: "opencode-go", id: "opencode-go/fast", rawModelId: "fast" }))).toBe("go-key-priority");
+    // console-origin models stay session-scoped even when a key exists
+    const consoleOrigin = await credentialForModel(gatewayModel({ source: "console" }), auth);
+    expect(consoleOrigin?.token).toBe("session-token");
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+    clearKeys();
+  });
+
+  test("the shared Console session authorizes gateway models without a key", async () => {
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    writeSession("session-token");
+    expect(await tokenFor(gatewayModel({}))).toBe("session-token");
+    expect(await tokenFor(gatewayModel({ providerId: "opencode-go", id: "opencode-go/fast", rawModelId: "fast" }))).toBe("session-token");
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+  });
+
+  test("the go slot's session wins over the console-compat fallback", async () => {
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    writeSession("console-slot-token");
+    saveModeSession("go", goSlotSession("go-slot-token"));
+    expect(await tokenFor(gatewayModel({}))).toBe("console-slot-token");
+    expect(await tokenFor(goModel())).toBe("go-slot-token");
+    clearModeSession("go");
+    // compat: without a go sign-in the console slot's shared session applies
+    expect(await tokenFor(goModel())).toBe("console-slot-token");
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+  });
+
+  test("anonymous gateway requests keep the public sentinel", async () => {
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    expect(await tokenFor(gatewayModel({}))).toBe("public");
+  });
+});
+
+function goModel(): Oc3Model {
+  return gatewayModel({ providerId: "opencode-go", id: "opencode-go/fast", rawModelId: "fast" });
+}
+
+function goSlotSession(token: string): ConsoleSession {
+  return sessionFixture({ token, accountId: "acct-b", email: "b@example.com", orgId: "org-b", orgName: "Org B" });
+}
+
+function writeSession(token: string, server = "https://opencode.ai/console"): void {
+  writeLegacySession(process.env.OC3_HOME!, token, server);
+}
+
 async function tokenFor(model: Oc3Model): Promise<string | undefined> {
   return (await credentialForModel(model, auth))?.token;
 }
 
-function writeSession(token: string, server = "https://opencode.ai/console"): void {
-  writeFileSync(`${process.env.OC3_HOME}/session.json`, JSON.stringify({
-    mode: "console",
-    server,
-    accessToken: token,
-    refreshToken: "refresh",
-    expiresAt: Date.now() + 3600_000,
-    accountId: "acct-1",
-    email: "test@example.com",
-    orgs: [{ id: "org-1", name: "Org" }],
-    orgId: "org-1",
-    orgName: "Org",
-  }, null, 2));
-}
-
 describe("keys store", () => {
   test("persists 0600 keys.json in OC3_HOME", () => {
-    saveKeys({ zen: "secret-zen-key" });
+    saveKeys({ console: "secret-console-key" });
     const path = `${process.env.OC3_HOME}/keys.json`;
     expect(existsSync(path)).toBe(true);
-    expect(loadKeys().zen).toBe("secret-zen-key");
+    expect(loadKeys().console).toBe("secret-console-key");
     chmodSync(path, 0o644);
-    saveKeys({ zen: "secret-zen-key" });
+    saveKeys({ console: "secret-console-key" });
     expect((statSync(path).mode & 0o777) === 0o600).toBe(true);
     expect(readFileSync(path, "utf8")).not.toContain("undefined");
     clearKeys();
@@ -338,13 +382,45 @@ describe("keys store", () => {
   });
 });
 
+describe("legacy state migration", () => {
+  test("migrates the legacy zen key slot to console and rewrites keys.json", () => {
+    const path = `${process.env.OC3_HOME}/keys.json`;
+    writeFileSync(path, JSON.stringify({ zen: "legacy-zen-key", go: "go-key-456" }), { mode: 0o600 });
+    expect(loadKeys()).toEqual({ console: "legacy-zen-key", go: "go-key-456" });
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ console: "legacy-zen-key", go: "go-key-456" });
+    clearKeys();
+  });
+
+  test("rewrites only when the legacy slot is present", () => {
+    const path = `${process.env.OC3_HOME}/keys.json`;
+    writeFileSync(path, JSON.stringify({ console: "kept", go: "go-key" }), { mode: 0o600 });
+    expect(loadKeys()).toEqual({ console: "kept", go: "go-key" });
+    expect(JSON.parse(readFileSync(path, "utf8")).console).toBe("kept");
+    clearKeys();
+  });
+
+  test("remaps the v2 models.json zen section into console", () => {
+    const path = `${process.env.OC3_HOME}/models.json`;
+    const orgModel = gatewayModel({ source: "console" });
+    writeFileSync(path, JSON.stringify({ version: 2, console: [orgModel], zen: [gatewayModel({})], go: [gatewayModel({ providerId: "opencode-go", id: "opencode-go/x" })], updatedAt: { zen: 111, go: 222 } }));
+    const cache = loadCatalogCache();
+    expect(cache.console).toEqual([orgModel]);
+    expect(cache.go).toHaveLength(1);
+    expect(cache.updatedAt).toEqual({});
+    writeFileSync(path, JSON.stringify({ version: 2, console: [], zen: [gatewayModel({})], go: [] }));
+    // with no org models, the public zen catalog becomes the console section
+    expect(loadCatalogCache().console).toHaveLength(1);
+    rmSync(path);
+  });
+});
+
 describe("gateway catalog fetch", () => {
   test("merges live /models with models.dev enrichment", async () => {
-    const models = await fetchGatewayModels("zen");
+    const models = await fetchGatewayModels("console");
     expect(models).toBeDefined();
     const gpt = models!.find((model) => model.rawModelId === "gpt-model");
     expect(gpt?.contextLength).toBe(400000);
-    expect(gpt?.baseUrl).toBe(`http://127.0.0.1:${ZEN_PORT}/v1`);
+    expect(gpt?.baseUrl).toBe(`http://127.0.0.1:${CONSOLE_PORT}/v1`);
     // live list is authoritative: catalog-only entries are dropped
     expect(models!.find((model) => model.rawModelId === "paid-model")).toBeUndefined();
     const goModels = await fetchGatewayModels("go");
@@ -354,19 +430,70 @@ describe("gateway catalog fetch", () => {
   });
 
   test("returns undefined when the live catalog is unreachable", async () => {
+    setEnv("OC3_CONSOLE_BASE_URL", "http://127.0.0.1:59999/v1");
+    expect(await fetchGatewayModels("console")).toBeUndefined();
+    setEnv("OC3_CONSOLE_BASE_URL", `http://127.0.0.1:${CONSOLE_PORT}/v1`);
+  });
+
+  test("legacy OC3_ZEN_BASE_URL still overrides the console gateway", async () => {
+    setEnv("OC3_CONSOLE_BASE_URL", undefined);
     setEnv("OC3_ZEN_BASE_URL", "http://127.0.0.1:59999/v1");
-    expect(await fetchGatewayModels("zen")).toBeUndefined();
-    setEnv("OC3_ZEN_BASE_URL", `http://127.0.0.1:${ZEN_PORT}/v1`);
+    expect(await fetchGatewayModels("console")).toBeUndefined();
+    setEnv("OC3_ZEN_BASE_URL", undefined);
+    setEnv("OC3_CONSOLE_BASE_URL", `http://127.0.0.1:${CONSOLE_PORT}/v1`);
   });
 
   test("refresh keeps the cached section when the gateway is down", async () => {
-    saveCatalogSection("zen", [gatewayModel({})]);
-    setEnv("OC3_ZEN_BASE_URL", "http://127.0.0.1:59999/v1");
+    saveCatalogSection("console", [gatewayModel({})]);
+    setEnv("OC3_CONSOLE_BASE_URL", "http://127.0.0.1:59999/v1");
     const { refreshGatewayCatalogs } = await import("../src/console");
     const result = await refreshGatewayCatalogs();
-    expect(result.errors.some((message) => message.includes("Zen catalog unreachable"))).toBe(true);
-    expect(loadCatalogCache().zen).toHaveLength(1);
-    setEnv("OC3_ZEN_BASE_URL", `http://127.0.0.1:${ZEN_PORT}/v1`);
+    expect(result.errors.some((message) => message.includes("Console catalog unreachable"))).toBe(true);
+    expect(loadCatalogCache().console).toHaveLength(1);
+    setEnv("OC3_CONSOLE_BASE_URL", `http://127.0.0.1:${CONSOLE_PORT}/v1`);
+  });
+
+  test("skips the public console refresh when a Console session supersedes it", async () => {
+    const { refreshGatewayCatalogs } = await import("../src/console");
+    saveCatalogSection("console", []);
+    const result = await refreshGatewayCatalogs({ skipConsole: true });
+    expect(result.console).toEqual([]);
+    expect(result.errors).not.toContain(expect.stringContaining("Console catalog unreachable"));
+    expect(loadCatalogCache().console).toEqual([]);
+    expect((loadCatalogCache().go as Oc3Model[]).map((model) => model.rawModelId)).toEqual(["minimax-m3", "paid-go"]);
+    await refreshGatewayCatalogs();
+    // anonymous discovery keeps only free models (gpt-model has a positive cost)
+    expect((loadCatalogCache().console as Oc3Model[]).map((model) => model.rawModelId)).toEqual(["gemini-flash"]);
+  });
+
+  test("anonymous console discovery filters paid models and sends no Bearer", async () => {
+    const { refreshGatewayCatalogs } = await import("../src/console");
+    consoleModelAuths.length = 0;
+    const result = await refreshGatewayCatalogs({});
+    expect(consoleModelAuths[0]).toBeUndefined();
+    expect(result.console.map((model) => model.rawModelId)).toEqual(["gemini-flash"]);
+    expect(result.console.map((model) => model.rawModelId)).not.toContain("expensive-luxury");
+    expect(result.console.map((model) => model.rawModelId)).not.toContain("gpt-model");
+    expect(loadCatalogCache().console as Oc3Model[]).toEqual(result.console);
+  });
+
+  test("credentialed discovery sends Bearer and keeps the full console list", async () => {
+    const { refreshGatewayCatalogs } = await import("../src/console");
+    consoleModelAuths.length = 0;
+    goModelAuths.length = 0;
+    const result = await refreshGatewayCatalogs({ consoleToken: "console-key-123", goToken: "go-key-456" });
+    expect(consoleModelAuths[0]).toBe("Bearer console-key-123");
+    expect(goModelAuths[0]).toBe("Bearer go-key-456");
+    expect(result.console.map((model) => model.rawModelId)).toContain("expensive-luxury");
+    expect(result.console.map((model) => model.rawModelId)).toContain("gpt-model");
+  });
+
+  test("go discovery never filters paid models, even anonymously", async () => {
+    const { refreshGatewayCatalogs } = await import("../src/console");
+    goModelAuths.length = 0;
+    const result = await refreshGatewayCatalogs({});
+    expect(goModelAuths[0]).toBeUndefined();
+    expect(result.go.map((model) => model.rawModelId)).toContain("paid-go");
   });
 });
 
@@ -381,16 +508,16 @@ describe("model metadata", () => {
   });
 
   test("display names carry bracketed backend tags that routing strips", () => {
-    expect(displayName(gatewayModel({}))).toBe("GPT via Zen [Zen]");
-    expect(displayName(gatewayModel({ providerId: "opencode-go", source: "gateway" }))).toBe("GPT via Zen [Go]");
-    expect(displayName(gatewayModel({ source: "console" }))).toBe("GPT via Zen [Console]");
+    expect(displayName(gatewayModel({}))).toBe("GPT via Console [Console]");
+    expect(displayName(gatewayModel({ providerId: "opencode-go", source: "gateway" }))).toBe("GPT via Console [Go]");
+    expect(displayName(gatewayModel({ source: "console" }))).toBe("GPT via Console [Console]");
     expect(displayName(gatewayModel({ providerId: "chatgpt", name: "GPT 6 Astra" }))).toBe("GPT 6 Astra [ChatGPT]");
-    const found = findModel([gatewayModel({ id: "acme/gpt-model", rawModelId: "gpt-model", providerId: "acme", name: "GPT 5.6 Sol" })], "acme/gpt-model [Zen]");
+    const found = findModel([gatewayModel({ id: "acme/gpt-model", rawModelId: "gpt-model", providerId: "acme", name: "GPT 5.6 Sol" })], "acme/gpt-model [Console]");
     expect(found?.id).toBe("acme/gpt-model");
   });
 
   test("providerLabel distinguishes every backend family", () => {
-    expect(providerLabel(gatewayModel({}))).toBe("OpenCode Zen");
+    expect(providerLabel(gatewayModel({}))).toBe("OpenCode Console");
     expect(providerLabel(gatewayModel({ providerId: "opencode-go", source: "gateway" }))).toBe("OpenCode Go");
     expect(providerLabel(gatewayModel({ source: "console" }))).toBe("OpenCode Console");
     expect(providerLabel(gatewayModel({ providerId: "openai" }))).toBe("OpenAI (native)");
@@ -428,7 +555,7 @@ describe("model metadata", () => {
 
 describe("gateway usage endpoint", () => {
   test("honors the OC3_GO_BASE_URL override", async () => {
-    const { fetchGatewayUsage } = await import("../src/zen");
+    const { fetchGatewayUsage } = await import("../src/gateway");
     const usage = await fetchGatewayUsage("go-key-456");
     expect(usage.usage).toBeDefined();
     expect(usage.usage).toMatchObject({ rolling: { percent: 12 } });
@@ -437,12 +564,13 @@ describe("gateway usage endpoint", () => {
 
 describe("refresh error surfacing", () => {
   test("reports console failures without losing gateway models", async () => {
-    saveCatalogSection("zen", [gatewayModel({})]);
+    saveCatalogSection("console", [gatewayModel({})]);
     writeSession("session-token", "http://127.0.0.1:59998");
     const { refreshModels } = await import("../src/console");
     const result = await refreshModels(auth);
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.models.find((model) => model.providerId === "opencode")).toBeDefined();
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
     rmSync(`${process.env.OC3_HOME}/session.json`);
   });
 });
@@ -464,14 +592,49 @@ describe("console org headers", () => {
     expect(request.headers["x-org-id"]).toBe("org-1");
     expect(request.headers["x-opencode-org-id"]).toBe("org-1");
     handle.stop();
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
+    rmSync(`${process.env.OC3_HOME}/session.json`);
+  });
+
+  test("go gateway requests carry the acting go slot's org headers", async () => {
+    saveCatalogSection("go", [{
+      id: "opencode-go/fast",
+      rawModelId: "fast",
+      providerId: "opencode-go",
+      name: "Fast",
+      contextLength: 200000,
+      maxOutputTokens: 32000,
+      reasoning: false,
+      imageInput: false,
+      toolCalling: true,
+      endpoint: "chat-completions",
+      baseUrl: `http://127.0.0.1:${GO_PORT}/v1`,
+      source: "gateway",
+    }]);
+    writeSession("console-slot-token");
+    saveModeSession("go", goSlotSession("go-slot-token"));
+    const handle = await startServer({ port: PROXY_PORT + 5, auth });
+    const response = await postResponses(handle.port, {
+      model: "opencode-go/fast",
+      stream: true,
+      store: false,
+      input: "hello",
+    });
+    expect(response.status).toBe(200);
+    const request = goRequests[goRequests.length - 1]!;
+    expect(request.headers.authorization).toBe("Bearer go-slot-token");
+    expect(request.headers["x-org-id"]).toBe("org-b");
+    expect(request.headers["x-opencode-org-id"]).toBe("org-b");
+    handle.stop();
+    rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
     rmSync(`${process.env.OC3_HOME}/session.json`);
   });
 });
 
 describe("oc3 proxy server with gateway models", () => {
   beforeAll(() => {
-    saveKeys({ zen: "zen-key-123" });
-    saveCatalogSection("zen", [
+    saveKeys({ console: "console-key-123", go: "go-key-456" });
+    saveCatalogSection("console", [
       gatewayModel({}),
       gatewayModel({ id: "opencode/gemini-flash", rawModelId: "gemini-flash", endpoint: "google", name: "Gemini" }),
     ]);
@@ -505,11 +668,10 @@ describe("oc3 proxy server with gateway models", () => {
         source: "gateway",
       },
     ]);
-    saveCatalogSection("console", []);
   });
 
-  test("proxies Responses requests to Zen with the gateway key and parity extras", async () => {
-    zenRequests.length = 0;
+  test("proxies Responses requests to Console with the service key and parity extras", async () => {
+    consoleRequests.length = 0;
     const handle = await startServer({ port: PROXY_PORT, auth });
     const response = await postResponses(handle.port, {
       model: "opencode/gpt-model",
@@ -523,10 +685,10 @@ describe("oc3 proxy server with gateway models", () => {
     const text = await response.text();
     expect(text).toContain("response.completed");
     expect(text).toContain('"type":"ping"');
-    expect(zenRequests).toHaveLength(1);
-    const request = zenRequests[0]!;
-    expect(request.url).toBe(`http://127.0.0.1:${ZEN_PORT}/v1/responses`);
-    expect(request.headers.authorization).toBe("Bearer zen-key-123");
+    expect(consoleRequests).toHaveLength(1);
+    const request = consoleRequests[0]!;
+    expect(request.url).toBe(`http://127.0.0.1:${CONSOLE_PORT}/v1/responses`);
+    expect(request.headers.authorization).toBe("Bearer console-key-123");
     expect(request.headers["x-opencode-client"]).toBe("oc3");
     expect(request.headers["x-opencode-project"]).toBe("oc3");
     expect(request.body.prompt_cache_key).toBeString();
@@ -549,7 +711,7 @@ describe("oc3 proxy server with gateway models", () => {
     expect(text).toContain("response.completed");
     expect(text).toContain("response.output_text.delta");
     expect(goRequests).toHaveLength(1);
-    expect(goRequests[0]!.headers.authorization).toBe("Bearer zen-key-123");
+    expect(goRequests[0]!.headers.authorization).toBe("Bearer go-key-456");
     expect("chat_template_args" in goRequests[0]!.body).toBe(false);
     handle.stop();
   });
@@ -571,7 +733,7 @@ describe("oc3 proxy server with gateway models", () => {
     handle.stop();
   });
 
-  test("messages models on the gateway use the gateway key via x-api-key", async () => {
+  test("messages models on the gateway use the go service key via x-api-key", async () => {
     goRequests.length = 0;
     const handle = await startServer({ port: PROXY_PORT + 2, auth });
     saveCatalogSection("go", [
@@ -600,7 +762,7 @@ describe("oc3 proxy server with gateway models", () => {
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).toContain("response.completed");
-    expect(goRequests[goRequests.length - 1]!.headers["x-api-key"]).toBe("zen-key-123");
+    expect(goRequests[goRequests.length - 1]!.headers["x-api-key"]).toBe("go-key-456");
     expect(goRequests[goRequests.length - 1]!.headers["anthropic-version"]).toBe("2023-06-01");
     handle.stop();
     saveCatalogSection("go", []);

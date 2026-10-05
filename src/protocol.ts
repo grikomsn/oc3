@@ -20,7 +20,8 @@ export function nativeOpenAiBase(): string {
 }
 
 export type EndpointKind = "chat-completions" | "messages" | "responses" | "google";
-export type OpenCodeMode = "zen" | "go" | "console";
+/** Upstream merged the Zen provider into Console; the two modes are console | go. */
+export type OpenCodeMode = "console" | "go";
 
 export interface ConsoleOrg {
   id: string;
@@ -102,7 +103,7 @@ export function resolveEndpointKind(modelId: string, mode: OpenCodeMode, package
   if (/^muse-spark-/i.test(modelId)) return "responses";
   if (/^qwen3\.\d+-(?:plus|max|flash)$/i.test(modelId)) return "messages";
   if (mode === "go" && /^minimax-/i.test(modelId)) return "messages";
-  if (mode === "zen" && /^gemini-/i.test(modelId)) return "google";
+  if (mode === "console" && /^gemini-/i.test(modelId)) return "google";
   return "chat-completions";
 }
 

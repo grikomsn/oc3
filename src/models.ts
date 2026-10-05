@@ -56,59 +56,54 @@ export function apiBaseForMode(mode: OpenCodeMode): string {
 }
 
 export function modelsFromProvider(providerId: string, provider: ProviderSource): Oc3Model[] {
-  const sources = provider.models ?? {};
-  return Object.entries(sources).flatMap(([rawId, source]) => {
-    if (source.status === "deprecated" || source.disabled === true) return [];
-    const packageName = source.provider?.npm ?? provider.npm;
-    const baseUrl = source.provider?.api ?? provider.api ?? apiBaseForMode("zen");
-    const modelId = source.id ?? rawId;
-    const contextLength = positive(source.limit?.context, 32768);
-    return [{
-      id: rawId,
-      rawModelId: modelId,
-      providerId,
-      name: source.name ?? prettifyModelName(modelId),
-      contextLength,
-      maxOutputTokens: positive(source.limit?.output, Math.min(contextLength, 8192)),
-      reasoning: source.reasoning === true,
-      imageInput: Array.isArray(source.modalities?.input) ? source.modalities.input.includes("image") : source.attachment === true,
-      toolCalling: source.tool_call === true,
-      endpoint: resolveEndpointKind(modelId, "console", packageName),
-      baseUrl,
-      source: "console",
-      ...spreadMetadata(source),
-      ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
-      ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
-    }];
-  });
+  return catalogModelSources({ providerId, provider, mode: "console", kind: "console" });
 }
 
-// Gateway (Zen / Go) provider entry from the models.dev-style catalog.
-// Diffs from the console path: ids are always namespaced by provider, the
-// endpoint kind resolves with the gateway mode, and the baseUrl defaults to
-// the mode's gateway root instead of the console default.
-export function modelsFromGatewayProvider(providerId: string, provider: ProviderSource, mode: "zen" | "go"): Oc3Model[] {
+// Gateway (Console / Go) provider entry from the models.dev-style catalog.
+// Diffs from the console path: ids are namespaced by provider, the endpoint
+// kind resolves with the gateway mode, the baseUrl defaults to the mode's
+// gateway root, and the raw id stays the default name.
+export function modelsFromGatewayProvider(providerId: string, provider: ProviderSource, mode: OpenCodeMode): Oc3Model[] {
+  return catalogModelSources({ providerId, provider, mode, kind: "gateway", namespace: true, useRawName: true });
+}
+
+/**
+ * One catalog-entry mapper for every source shape (native catalog, gateway
+ * catalog, Console org config): skip deprecated/disabled, map ids, limits,
+ * reasoning/image/tool flags, endpoint+baseUrl, header/body options, and
+ * metadata (efforts/cost) the same way everywhere.
+ */
+interface CatalogSourceOptions {
+  providerId: string;
+  provider: ProviderSource;
+  mode: OpenCodeMode;
+  kind: "console" | "gateway";
+  namespace?: boolean;
+  useRawName?: boolean;
+}
+
+function catalogModelSources({ providerId, provider, mode, kind, namespace, useRawName }: CatalogSourceOptions): Oc3Model[] {
   const sources = provider.models ?? {};
-  return Object.entries(sources).flatMap(([rawId, source]) => {
-    if (source.status === "deprecated" || source.disabled === true) return [];
-    const packageName = source.provider?.npm ?? provider.npm;
-    const baseUrl = source.provider?.api ?? provider.api ?? apiBaseForMode(mode);
-    const modelId = source.id ?? rawId;
-    const contextLength = positive(source.limit?.context, 32_768);
+  return Object.entries(sources).flatMap(([rawId, model]) => {
+    if (model.status === "deprecated" || model.disabled === true) return [];
+    const packageName = model.provider?.npm ?? provider.npm;
+    const baseUrl = model.provider?.api ?? provider.api ?? apiBaseForMode(mode);
+    const modelId = model.id ?? rawId;
+    const contextLength = positive(model.limit?.context, 32_768);
     return [{
-      id: `${providerId}/${rawId}`,
+      id: namespace ? `${providerId}/${rawId}` : rawId,
       rawModelId: modelId,
       providerId,
-      name: source.name ?? rawId,
+      name: useRawName ? (model.name ?? rawId) : (model.name ?? prettifyModelName(modelId)),
       contextLength,
-      maxOutputTokens: positive(source.limit?.output, Math.min(contextLength, 8192)),
-      reasoning: source.reasoning === true,
-      imageInput: Array.isArray(source.modalities?.input) ? source.modalities.input.includes("image") : source.attachment === true,
-      toolCalling: source.tool_call === true,
+      maxOutputTokens: positive(model.limit?.output, Math.min(contextLength, 8192)),
+      reasoning: model.reasoning === true,
+      imageInput: Array.isArray(model.modalities?.input) ? model.modalities.input.includes("image") : model.attachment === true,
+      toolCalling: model.tool_call === true,
       endpoint: resolveEndpointKind(modelId, mode, packageName),
       baseUrl,
-      source: "gateway",
-      ...spreadMetadata(source),
+      source: kind,
+      ...spreadMetadata(model),
       ...(provider.options && isStringRecord(provider.options.headers) ? { headers: provider.options.headers } : {}),
       ...(provider.options ? { body: withoutCredentials(provider.options) } : {}),
     }];
@@ -116,7 +111,7 @@ export function modelsFromGatewayProvider(providerId: string, provider: Provider
 }
 
 // Minimal model for a gateway /models entry with no models.dev metadata.
-export function minimalGatewayModel(providerId: string, mode: "zen" | "go", rawModelId: string): Oc3Model {
+export function minimalGatewayModel(providerId: string, mode: OpenCodeMode, rawModelId: string): Oc3Model {
   return {
     id: `${providerId}/${rawModelId}`,
     rawModelId,
@@ -168,7 +163,7 @@ export function nativeOpenAiModels(): Oc3Model[] {
       reasoning: true,
       imageInput: true,
       toolCalling: true,
-      endpoint: resolveEndpointKind(id, "zen", "@ai-sdk/openai"),
+      endpoint: resolveEndpointKind(id, "console", "@ai-sdk/openai"),
       baseUrl: process.env.OC3_OPENAI_BASE_URL ?? nativeOpenAiBase(),
     });
   }
@@ -234,18 +229,36 @@ export function prettifyModelName(rawId: string): string {
   }).join(" ");
 }
 
-export type ModelGroup = "console" | "zen" | "go" | "chatgpt" | "openai" | "other";
+/** The first-party OpenCode provider ids oc3 proxies. */
+export const OPENCODE_PROVIDER_IDS = ["opencode", "opencode-go"] as const;
+
+export function isGatewayProvider(providerId: string): boolean {
+  return providerId === "opencode" || providerId === "opencode-go";
+}
+
+/** Which mode slot (console / go) a model routes through; provider id decides. */
+export function modelMode(model: Oc3Model): OpenCodeMode {
+  return model.providerId === "opencode-go" ? "go" : "console";
+}
+
+/** Human label for a mode slot. */
+export function modeLabel(mode: OpenCodeMode): string {
+  return mode === "console" ? "Console" : "Go";
+}
+
+/** Backend families: OpenCode Console (org or gateway), OpenCode Go, natives. */
+export type ModelGroup = "console" | "go" | "chatgpt" | "openai" | "other";
 
 /** Which backend family a model belongs to, used for ordering and labels. */
 export function modelGroup(model: Oc3Model): ModelGroup {
   if (model.providerId === "openai") return "openai";
   if (model.providerId === "chatgpt") return "chatgpt";
-  if (model.source === "gateway") return model.providerId === "opencode-go" ? "go" : "zen";
+  if (model.source === "gateway") return modelMode(model);
   if (model.source === "console" || model.source === undefined) return "console";
   return "other";
 }
 
-const GROUP_ORDER: ReadonlyArray<ModelGroup> = ["console", "zen", "go", "chatgpt", "openai", "other"];
+const GROUP_ORDER: ReadonlyArray<ModelGroup> = ["console", "go", "chatgpt", "openai", "other"];
 
 /** Stable backend-family ordering: Console, Zen, Go, native ChatGPT, native OpenAI. */
 export function sortModelsByGroup(models: readonly Oc3Model[]): Oc3Model[] {
@@ -255,7 +268,6 @@ export function sortModelsByGroup(models: readonly Oc3Model[]): Oc3Model[] {
 
 const GROUP_SHORT: Record<Exclude<ModelGroup, "other">, string> = {
   console: "Console",
-  zen: "Zen",
   go: "Go",
   chatgpt: "ChatGPT",
   openai: "OpenAI",
@@ -273,7 +285,6 @@ export function providerLabel(model: Oc3Model): string {
   switch (modelGroup(model)) {
     case "openai": return "OpenAI (native)";
     case "chatgpt": return "ChatGPT (native)";
-    case "zen": return "OpenCode Zen";
     case "go": return "OpenCode Go";
     case "console": return "OpenCode Console";
     default: return model.providerId;

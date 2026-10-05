@@ -1,7 +1,10 @@
-// OpenCode gateway (Zen / Go) support: catalog discovery, credential routing
-// and wire parity for the first-party opencode / opencode-go providers.
-// References: sst/opencode packages/core/src/models-dev.ts, packages/core/src/
-// plugin/provider/opencode.ts, console app routes zen/v1 + zen/go/v1.
+// OpenCode gateway (Console / Go) support: catalog discovery, credential
+// routing and wire parity for the first-party opencode / opencode-go providers.
+// Upstream merged the standalone Zen provider into Console; the console mode is
+// still served by the historical /zen/v1 path while Go serves /zen/go/v1.
+// References: anomalyco/opencode packages/core/src/plugin/provider/opencode.ts,
+// console app routes zen/v1 + zen/go/v1; sibling implementation in
+// opencode-copilot-chat commit 1416b17.
 
 import {
   apiBaseForMode,
@@ -10,18 +13,23 @@ import {
   type Oc3Model,
   type ProviderSource,
 } from "./models";
+import type { OpenCodeMode } from "./protocol";
 
-export const GATEWAY_PROVIDER_IDS = { zen: "opencode", go: "opencode-go" } as const;
+export const GATEWAY_PROVIDER_IDS = { console: "opencode", go: "opencode-go" } as const;
 export const GATEWAY_MODELS_CATALOG_URL = "https://models.opencode.ai/api.json";
 
-export type GatewayMode = "zen" | "go";
+export type GatewayMode = OpenCodeMode;
+
+import type { ServiceKeys } from "./store";
 
 export function gatewayProviderId(mode: GatewayMode): string {
   return GATEWAY_PROVIDER_IDS[mode];
 }
 
 export function gatewayBaseUrl(mode: GatewayMode): string {
-  const override = mode === "go" ? process.env.OC3_GO_BASE_URL : process.env.OC3_ZEN_BASE_URL;
+  const override = mode === "go"
+    ? process.env.OC3_GO_BASE_URL
+    : (process.env.OC3_CONSOLE_BASE_URL ?? process.env.OC3_ZEN_BASE_URL);
   return (override ?? apiBaseForMode(mode)).replace(/\/+$/, "");
 }
 
@@ -29,23 +37,25 @@ function gatewayCatalogUrl(): string {
   return (process.env.OC3_GATEWAY_CATALOG_URL ?? GATEWAY_MODELS_CATALOG_URL).replace(/\/+$/, "");
 }
 
-/** The gateway key that authorizes one provider's requests. */
-export function gatewayKeyFor(providerId: string, keys: { zen?: string; go?: string }, envKey?: string): string {
+/** The per-mode service-account key that authorizes one provider's requests. */
+export function gatewayKeyFor(providerId: string, keys: ServiceKeys, envKey?: string): string {
   const env = envKey ?? process.env.OPENCODE_API_KEY;
-  if (providerId === "opencode-go") return keys.go ?? keys.zen ?? env ?? "";
-  return keys.zen ?? keys.go ?? env ?? "";
+  if (providerId === "opencode-go") return keys.go ?? env ?? "";
+  return keys.console ?? env ?? "";
 }
 
 /**
  * Fetch and build the model catalog for one gateway mode. The live
  * `GET {base}/models` list is authoritative (it honors workspace-disabled
- * models); the models.dev snapshot only enriches metadata. Returns undefined
- * when the live list is unreachable so callers can keep the stale cache.
+ * models); the models.dev snapshot only enriches metadata. A token (service
+ * key or shared Console session) rides along as Bearer so the server can
+ * return the workspace's enabled set. Returns undefined when the live list is
+ * unreachable so callers can keep the stale cache.
  */
-export async function fetchGatewayModels(mode: GatewayMode): Promise<Oc3Model[] | undefined> {
+export async function fetchGatewayModels(mode: GatewayMode, token?: string): Promise<Oc3Model[] | undefined> {
   const baseUrl = gatewayBaseUrl(mode);
   const providerId = gatewayProviderId(mode);
-  const liveIds = await fetchLiveModelIds(baseUrl, providerId);
+  const liveIds = await fetchLiveModelIds(baseUrl, providerId, token);
   if (!liveIds) return undefined;
   const byRaw = new Map<string, Oc3Model>();
   const catalogProvider = await loadGatewayCatalogProvider(providerId);
@@ -61,10 +71,10 @@ export async function fetchGatewayModels(mode: GatewayMode): Promise<Oc3Model[] 
   });
 }
 
-async function fetchLiveModelIds(baseUrl: string, providerId: string): Promise<string[] | undefined> {
+async function fetchLiveModelIds(baseUrl: string, providerId: string, token?: string): Promise<string[] | undefined> {
   try {
     const response = await fetch(`${baseUrl}/models`, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) return undefined;
@@ -126,6 +136,15 @@ export function gatewayResponsesExtras(body: Readonly<Record<string, unknown>>, 
 function mergeInclude(existing: unknown): string[] {
   const base = Array.isArray(existing) ? existing.filter((item) => typeof item === "string") as string[] : [];
   return base.includes("reasoning.encrypted_content") ? base : [...base, "reasoning.encrypted_content"];
+}
+
+/**
+ * Anonymous Console discovery mirrors upstream: with no credential at all the
+ * client shows only free models (cost.input <= 0 or unknown). With any token,
+ * the full list applies. Go discovery is never filtered.
+ */
+export function freeConsoleModels(models: readonly Oc3Model[]): Oc3Model[] {
+  return models.filter((model) => (model.cost?.input ?? 0) <= 0);
 }
 
 /**

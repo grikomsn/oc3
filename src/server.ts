@@ -1,9 +1,9 @@
 import { OpenCodeAuth } from "./auth";
 import { availableModels } from "./console";
-import { findModel, modelGroup, type Oc3Model } from "./models";
+import { findModel, isGatewayProvider, modelGroup, type Oc3Model } from "./models";
 import { buildRequestHeaders, endpointUrl, nativeChatGptBase, nativeOpenAiBase, newId, userAgent } from "./protocol";
 import { credentialErrorHint, credentialForModel } from "./credentials";
-import { gatewayChatTemplateArgs, gatewayResponsesExtras } from "./zen";
+import { gatewayChatTemplateArgs, gatewayResponsesExtras } from "./gateway";
 import { formatSseEvent, parseSseData, responsesRequestToChat, ChatStreamToResponses } from "./translate";
 import { analyzeHttp400ForRetry, isTransientNetworkError, isTransientServerError, retryDelayMs } from "./retry";
 import { SseParser } from "./sse-parser";
@@ -613,7 +613,7 @@ async function passthroughNative(request: Request, body: Record<string, unknown>
 // Console references disagree on the inference org header (copilot-chat sends
 // x-org-id, pi-provider sends x-opencode-org-id); send both until verified live.
 function gatewayErrorResponse(model: Oc3Model, status: number, detail: string): Response {
-  const gateway = model.providerId === "opencode" || model.providerId === "opencode-go";
+  const gateway = isGatewayProvider(model.providerId);
   const message = gateway && status === 429
     ? `Upstream error ${status}: ${detail.slice(0, 2000)} — OpenCode gateway rate limit or subscription quota reached; run \`oc3 usage\` for Go quota (keys: https://opencode.ai/auth)`
     : `Upstream error ${status}: ${detail.slice(0, 2000)}`;

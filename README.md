@@ -1,6 +1,6 @@
 # oc3
 
-Run [OpenCode Console](https://opencode.ai/console), Zen, and Go models in OpenAI Codex and ChatGPT desktop — one local proxy, every OpenCode provider variant.
+Run [OpenCode Console](https://opencode.ai/console) and Go models in OpenAI Codex and ChatGPT desktop — one local proxy, both OpenCode provider modes.
 
 ```shell
 npx @nbrst/oc3
@@ -34,33 +34,37 @@ macOS (arm64/x64) and Linux (x64/arm64). Windows is not supported yet.
 | `oc3 stop` | Restore your previous config and stop the proxy |
 | `oc3 login` | Device-code sign in to OpenCode Console |
 | `oc3 serve` | Proxy only, config untouched |
-| `oc3 keys --set KEY` | Store your shared OpenCode Zen/Go API key (or `--clear`) |
+| `oc3 keys --set KEY [--mode console\|go]` | Store a service key (console by default, or `--mode go`; `--clear` wipes both) |
 | `oc3 usage` | Show OpenCode Go subscription quota |
 
 First run: `oc3 login` (opens the browser, picks the org), then `oc3 start`. Codex
 and ChatGPT desktop are pointed at `http://127.0.0.1:8788` via the `[profiles.oc3]`
 block — `oc3 start` writes it, `oc3 stop` removes it.
 
-## Zen and Go (no Console sign-in needed)
+## Two modes, dual auth (no Console sign-in required)
 
-The gateway variants work with a plain API key from [opencode.ai/auth](https://opencode.ai/auth):
+Upstream merged the standalone Zen gateway into Console. oc3 now speaks upstream's
+two modes, each with two auth methods — a stored service-account API key takes
+precedence, the Console device-code session covers both modes in one sign-in:
+
+| Mode | Provider id | Served by | Auth methods |
+|---|---|---|---|
+| **Console** (pay-as-you-go, formerly Zen) | `opencode/<model>` | `https://opencode.ai/zen/v1` (historical path) | device-code Console account **or** console service key |
+| **Go** (subscription) | `opencode-go/<model>` | `https://opencode.ai/zen/go/v1` | device-code Console account **or** go service key |
 
 ```shell
-oc3 keys --set <zen-api-key>   # or set OPENCODE_API_KEY
-oc3 models --refresh           # Zen/Go catalogs are public; Console sign-in optional
+oc3 keys --set <console-service-key>   # or --mode go <go-service-key>, or set OPENCODE_API_KEY
+oc3 models --refresh                   # catalogs are public; Console sign-in upgrades the model list
 oc3 start
 ```
 
 | Command | What it does |
 |---|---|
-| TUI → Gateway (`3`) | Set/clear Zen and Go keys, check Go quota — no shell roundtrip |
+| TUI → Gateway (`3`) | Set/clear console and go service keys, check Go quota — no shell roundtrip |
 
-Zen (`opencode/<model>`) is pay-as-you-go, Go (`opencode-go/<model>`) is the
-subscription tier. Free/anonymous models work without any key. oc3 refreshes
-both catalogs from the gateway's public `/models` endpoints, enriches them from
-the models.dev snapshot, and translates Codex's Responses traffic into each
-model's dialect (responses, chat-completions, Anthropic messages, Gemini) with
-session-keyed prompt caching and encrypted-reasoning passthrough.
+Free models work without any credential. Signed in? The shared Console session also
+authorizes go models — subscriptions are managed in the Console. Signed out without
+keys? Anonymous requests hit the gateway's public sentinel and paid models stay hidden.
 
 ## How routing works
 
@@ -80,13 +84,13 @@ thinking metadata.
 ## Model picker groups
 
 The Codex picker catalog is grouped and labeled by backend family, in this
-order: **OpenCode Console** → **OpenCode Zen** (`opencode/<model>`) →
+order: **OpenCode Console** (`opencode/<model>` and Console org models) →
 **OpenCode Go** (`opencode-go/<model>`) → **ChatGPT (native)**
 (`chatgpt/<model>`) → **OpenAI (native)** (`openai/<model>`). Display names
 are prettified from raw ids ("gpt-5.6-sol" → "GPT 5.6 Sol") and carry a
-bracketed backend tag — "GPT 5.6 Sol [Zen]", "MiniMax M3 [Go]",
+bracketed backend tag — "GPT 5.6 Sol [Console]", "MiniMax M3 [Go]",
 "Claude Sonnet 5 [Console]" — which also works as an alias: `modelKey` strips
-it when routing, so `model [Zen]` resolves to the same model. The native `chatgpt/*` slugs route to the
+it when routing, so `model [Console]` resolves to the same model. The native `chatgpt/*` slugs route to the
 Codex ChatGPT backend with your own account session — disable them with
 `OC3_CHATGPT_MODELS=""` or trim the list.
 
@@ -97,7 +101,8 @@ Codex ChatGPT backend with your own account session — disable them with
 | `OC3_HOME` | State directory (default `~/.config/oc3`) |
 | `OC3_WEBSEARCH_PROVIDER` | `exa` or `parallel` for hosted search |
 | `OPENAI_API_KEY` | Expose native `openai/<model>` slugs |
-| `OPENCODE_API_KEY` | OpenCode Zen/Go gateway key (alternative to `oc3 keys`) |
+| `OPENCODE_API_KEY` | OpenCode service key fallback for both modes (alternative to `oc3 keys`) |
+| `OC3_CONSOLE_BASE_URL` | Console gateway base URL override (`OC3_ZEN_BASE_URL` legacy value still honored) |
 | `OC3_CHATGPT_MODELS` | Comma-separated native `chatgpt/<model>` slugs (empty disables) |
 | `PARALLEL_API_KEY` | Parallel search auth (optional) |
 
