@@ -11,7 +11,10 @@ export class SseParser {
   private buffer = "";
 
   push(chunk: string): SseBlock[] {
-    this.buffer += chunk.replace(/\r\n/g, "\n");
+    // A trailing CR may be the first half of a CRLF split across chunks, so it stays buffered.
+    const text = this.buffer + chunk;
+    const held = text.endsWith("\r") ? "\r" : "";
+    this.buffer = normalizeLineEndings(text.slice(0, text.length - held.length)) + held;
     const blocks: SseBlock[] = [];
     let boundary: number;
     while ((boundary = this.buffer.indexOf("\n\n")) >= 0) {
@@ -23,11 +26,15 @@ export class SseParser {
   }
 
   finish(): SseBlock[] {
-    const tail = this.buffer;
+    const tail = normalizeLineEndings(this.buffer);
     this.buffer = "";
     const block = parseBlock(tail);
     return block ? [block] : [];
   }
+}
+
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
 }
 
 function parseBlock(block: string): SseBlock | undefined {

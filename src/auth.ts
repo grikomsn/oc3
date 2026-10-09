@@ -7,7 +7,7 @@ import {
   type DeviceCode,
   type OpenCodeMode,
 } from "./protocol";
-import { clearModeSession, loadSessions, saveModeSession } from "./store";
+import { clearModeSession, isAllowedServer, loadSessions, saveModeSession } from "./store";
 
 type Fetcher = typeof fetch;
 type Sleeper = (milliseconds: number, signal?: AbortSignal) => Promise<void>;
@@ -46,6 +46,7 @@ export class OpenCodeAuth {
 
   async requestDeviceCode(server = DEFAULT_CONSOLE_SERVER): Promise<DeviceCode> {
     const normalized = server.replace(/\/+$/, "");
+    if (!isAllowedServer(normalized)) throw new Error("OpenCode Console server must use https (http is allowed only for 127.0.0.1 or localhost)");
     const response = await this.fetcher(`${normalized}/auth/device/code`, {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
@@ -124,21 +125,15 @@ export class OpenCodeAuth {
     const existing = this.refreshPromises.get(mode);
     if (existing?.identity === identity) return existing.promise;
     const promise = (async (): Promise<ConsoleSession> => {
-      const response = await this.fetcher(`${current.server}/auth/device/token`, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ grant_type: "refresh_token", refresh_token: current.refreshToken, client_id: OPENCODE_CLIENT_ID }),
-      });
-      if (!response.ok) throw new Error(`OpenCode ${mode} token refresh failed (${response.status})`);
-      const value = await response.json() as Record<string, unknown>;
-      const accessToken = str(value.access_token);
-      if (!accessToken) throw new Error(`OpenCode ${mode} token refresh returned no access token`);
-      const next: ConsoleSession = {
-        ...current,
-        accessToken,
-        refreshToken: str(value.refresh_token) ?? current.refreshToken,
-        expiresAt: this.now() + positiveNumber(value.expires_in, 3600) * 1000,
-      };
+      let next: ConsoleSession;
+      try {
+        next = await this.requestRefresh(mode, current);
+      } catch (error) {
+        // Another process may have rotated the refresh token while this request was in flight; its session is the live one.
+        const stored = loadSessions()[mode];
+        if (stored && stored.refreshToken !== current.refreshToken) return stored;
+        throw error;
+      }
       const stored = loadSessions()[mode];
       if (stored && stored.refreshToken === current.refreshToken) saveModeSession(mode, next);
       return next;
@@ -149,6 +144,24 @@ export class OpenCodeAuth {
     return promise;
   }
 
+  private async requestRefresh(mode: OpenCodeMode, current: ConsoleSession): Promise<ConsoleSession> {
+    const response = await this.fetcher(`${current.server}/auth/device/token`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ grant_type: "refresh_token", refresh_token: current.refreshToken, client_id: OPENCODE_CLIENT_ID }),
+    });
+    if (!response.ok) throw new Error(`OpenCode ${mode} token refresh failed (${response.status})`);
+    const value = await response.json() as Record<string, unknown>;
+    const accessToken = str(value.access_token);
+    if (!accessToken) throw new Error(`OpenCode ${mode} token refresh returned no access token`);
+    return {
+      ...current,
+      accessToken,
+      refreshToken: str(value.refresh_token) ?? current.refreshToken,
+      expiresAt: this.now() + positiveNumber(value.expires_in, 3600) * 1000,
+    };
+  }
+
   async selectOrganization(orgId: string, mode: OpenCodeMode): Promise<ConsoleSession> {
     const session = this.getSession(mode);
     if (!session) throw new Error(`Not signed in to OpenCode ${mode}. Run: oc3 login --mode ${mode}`);
@@ -157,11 +170,6 @@ export class OpenCodeAuth {
     const next = { ...session, orgId: match.id, orgName: match.name };
     saveModeSession(mode, next);
     return next;
-  }
-
-  async fetchOrganizations(token: string, server: string): Promise<ConsoleOrg[]> {
-    const value = await this.getJson(server, "/api/orgs", token) as unknown[];
-    return normalizeOrganizations(value);
   }
 
   /** Clears one mode's slot; the other mode's session is preserved. */

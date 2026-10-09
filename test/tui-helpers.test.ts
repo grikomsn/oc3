@@ -73,7 +73,7 @@ describe("fuzzyScore", () => {
 
 describe("maskKey", () => {
   test("masks keys and reports unset", () => {
-    expect(maskKey("sk-abcdef1234567890")).toBe("sk-a…7890");
+    expect(maskKey("sk-abcdef1234567890")).toBe("…7890");
     expect(maskKey("short")).toBe("••••••");
     expect(maskKey(undefined)).toBe("not set");
   });

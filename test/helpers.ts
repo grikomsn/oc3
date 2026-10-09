@@ -1,25 +1,51 @@
 // Shared test fixtures/env helpers for gateway, sessions, and server tests.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ConsoleSession } from "../src/protocol";
+
+/** A fresh directory under the system temp dir, so runs never share state. */
+export function tempRoot(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), `${prefix}-`));
+}
+
+/** The port a server bound. Servers started with port 0 report it only after binding. */
+export function portOf(server: { port?: number }): number {
+  if (server.port === undefined) throw new Error("server did not bind a port");
+  return server.port;
+}
+
+/**
+ * A loopback port nothing is listening on right now. Use it only where a flag or
+ * config must name the port before the server starts; otherwise bind port 0 and
+ * read the port back with portOf().
+ */
+export function freePort(): number {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("") });
+  const port = portOf(probe);
+  probe.stop(true);
+  return port;
+}
 
 /** Save-and-restore an env var for the current test file. */
 export function envSaver(): {
   set: (key: string, value: string | undefined) => void;
   restore: () => void;
 } {
-  const saved: Record<string, string | undefined> = {};
+  const saved = new Map<string, string | undefined>();
   return {
     set(key, value) {
-      saved[key] = process.env[key];
+      if (!saved.has(key)) saved.set(key, process.env[key]);
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     },
     restore() {
-      for (const [key, value] of Object.entries(saved)) {
+      for (const [key, value] of saved) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+      saved.clear();
     },
   };
 }

@@ -12,14 +12,14 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "compile": "bun build ./src/cli.ts --compile --minify --outfile ./dist/oc3",
-    "check": "bunx tsc --noEmit && eslint . && bun test",
-    "package": "bun build ./src/cli.ts --compile --minify --outfile ./dist/oc3",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "package": "bun run compile",
     "changeset": "changeset",
     "version": "changeset version",
     "lint": "eslint ."
   },
   "dependencies": {
-    "@opentui/core": "^0.1.26"
+    "@opentui/core": "0.1.107"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
@@ -56,6 +56,6 @@
     "url": "https://github.com/grikomsn/oc3/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=24.0.0"
   }
 }

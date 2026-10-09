@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { ChatStreamToResponses, parseSseData, responsesRequestToChat } from "../src/translate";
+import { applyReasoningWire } from "../src/desktop-normalize";
+import { SseParser } from "../src/sse-parser";
+import { ChatStreamToResponses, parseSseData, responsesRequestToChat, type EmittedEvent } from "../src/translate";
 import type { Oc3Model } from "../src/models";
 
 const chatModel: Oc3Model = {
@@ -102,15 +104,43 @@ describe("responsesRequestToChat", () => {
     ]);
   });
 
-  test("applies family-specific reasoning wire format", () => {
+  test("applyReasoningWire maps family-specific reasoning wire format", () => {
     const glm: Oc3Model = { ...chatModel, rawModelId: "glm-5.3", name: "glm" };
-    const result = responsesRequestToChat({
-      reasoning: { effort: "high" },
-    }, glm);
-    expect(result).toMatchObject({ reasoning_effort: "high" });
+    expect(applyReasoningWire({ reasoning: { effort: "high" } }, glm)).toMatchObject({ reasoning_effort: "high" });
     const qwen: Oc3Model = { ...chatModel, rawModelId: "qwen3-max" };
-    const qwenResult = responsesRequestToChat({ reasoning: { effort: "none" } }, qwen);
-    expect(qwenResult).toMatchObject({ enable_thinking: false });
+    expect(applyReasoningWire({ reasoning: { effort: "none" } }, qwen)).toMatchObject({ enable_thinking: false });
+  });
+
+  test("maps refusal parts to text", () => {
+    const result = responsesRequestToChat({
+      input: [{ type: "message", role: "assistant", content: [{ type: "refusal", refusal: "I can't help with that." }] }],
+    }, chatModel);
+    expect(result.messages[0]!.content).toEqual([{ type: "text", text: "I can't help with that." }]);
+  });
+
+  test("pairs a call without call_id with its output", () => {
+    const result = responsesRequestToChat({
+      input: [
+        { type: "function_call", name: "shell", arguments: "{}" },
+        { type: "function_call_output", output: "ok" },
+      ],
+    }, chatModel);
+    const callId = result.messages[0]!.tool_calls![0]!.id;
+    expect(callId).toMatch(/^call_/);
+    expect(result.messages[1]).toEqual({ role: "tool", tool_call_id: callId, content: "ok" });
+  });
+
+  test("maps developer and system items to the chat system role", () => {
+    const result = responsesRequestToChat({
+      input: [
+        { type: "message", role: "developer", content: "dev rules" },
+        { type: "message", role: "system", content: "sys rules" },
+        { type: "unknown_item", role: "developer", content: "untyped rules" },
+        { type: "unknown_item", role: "system", content: "fallback rules" },
+        { type: "message", role: "user", content: "hi" },
+      ],
+    }, chatModel);
+    expect(result.messages.map((message) => message.role)).toEqual(["system", "system", "system", "system", "user"]);
   });
 });
 
@@ -156,7 +186,7 @@ describe("ChatStreamToResponses", () => {
     const deltas = events.filter((event) => event.event === "response.function_call_arguments.delta");
     expect(deltas.every((event) => event.data.item_id === itemId)).toBe(true);
     const done = events.find((event) => event.event === "response.output_item.done")!;
-    expect((done.data.item as Record<string, unknown>).arguments).toBe("{\"yield_time_ms\":1200}");
+    expect((done.data.item as Record<string, unknown>).arguments).toBe("{\"yield_time_ms\": 1200}");
   });
 
   test("errors on unparseable tool arguments instead of completing", () => {
@@ -200,7 +230,76 @@ describe("ChatStreamToResponses", () => {
     const args = JSON.parse((done.data.item as Record<string, unknown>).arguments as string) as { input: string };
     expect(args.input).toBe("*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch");
   });
+
+  test("returns the error path for malformed apply_patch arguments instead of throwing", () => {
+    const converter = new ChatStreamToResponses("resp_7");
+    converter.ingest({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "apply_patch", arguments: "{\"input\":" } }] } }] });
+    expect(converter.finalize("tool_calls").map((event) => event.event)).toEqual(["error"]);
+  });
+
+  test("completed output carries the same final arguments as the done events", () => {
+    const converter = new ChatStreamToResponses("resp_8", new Map([
+      ["wait", { type: "object", properties: { yield_time_ms: { type: "integer" } } }],
+    ]));
+    const decorated = JSON.stringify({ input: "*** Begin Patch ***\n*** Add File: a.txt\n+hi\n*** End Patch ***" });
+    const events = [
+      ...converter.ingest({ choices: [{ delta: { tool_calls: [
+        { index: 0, id: "call_p", type: "function", function: { name: "apply_patch", arguments: decorated } },
+        { index: 1, id: "call_w", type: "function", function: { name: "wait", arguments: "{\"yield_time_ms\":1200.0}" } },
+      ] } }] }),
+      ...converter.ingest({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+      ...converter.finalize("tool_calls"),
+    ];
+    const doneArgs = events
+      .filter((event) => event.event === "response.function_call_arguments.done")
+      .map((event) => event.data.arguments);
+    const completed = events.at(-1)!.data.response as { output: Array<Record<string, unknown>> };
+    const outputArgs = completed.output.map((item) => item.arguments);
+    expect(doneArgs).toHaveLength(2);
+    expect(outputArgs).toEqual(doneArgs);
+    expect(outputArgs[0]).toBe("{\"input\":\"*** Begin Patch\\n*** Add File: a.txt\\n+hi\\n*** End Patch\"}");
+    expect(outputArgs[1]).toBe("{\"yield_time_ms\":1200}");
+  });
+
+  test("streamed finish_reason length is incomplete when finalized without a reason", () => {
+    const events = streamChatWire(new ChatStreamToResponses("resp_9"), [
+      { choices: [{ delta: { content: "partial" } }] },
+      { choices: [{ delta: {}, finish_reason: "length" }] },
+    ]);
+    const incomplete = events.find((event) => event.event === "response.incomplete");
+    expect(incomplete).toBeDefined();
+    expect((incomplete!.data.response as Record<string, unknown>).incomplete_details).toEqual({ reason: "max_output_tokens" });
+    expect(events.some((event) => event.event === "response.completed")).toBe(false);
+  });
+
+  test("streamed finish_reason stop completes when finalized without a reason", () => {
+    const events = streamChatWire(new ChatStreamToResponses("resp_10"), [
+      { choices: [{ delta: { content: "done" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ]);
+    expect(events.at(-1)!.event).toBe("response.completed");
+  });
+
+  test("an explicit finalize reason overrides the streamed finish_reason", () => {
+    const converter = new ChatStreamToResponses("resp_11");
+    converter.ingest({ choices: [{ delta: { content: "partial" } }] });
+    converter.ingest({ choices: [{ delta: {}, finish_reason: "length" }] });
+    expect(converter.finalize("stop").at(-1)!.event).toBe("response.completed");
+  });
 });
+
+// Mirrors server.ts streamChatToResponses: SSE parse, ingest each chunk, then finalize without a reason.
+function streamChatWire(converter: ChatStreamToResponses, chunks: unknown[]): EmittedEvent[] {
+  const parser = new SseParser();
+  const wire = chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("");
+  const events: EmittedEvent[] = [];
+  for (const block of [...parser.push(wire), ...parser.finish()]) {
+    const data = parseSseData(`data: ${block.data}`);
+    if (data) events.push(...converter.ingest(data));
+  }
+  events.push(...converter.finalize(undefined));
+  return events;
+}
 
 describe("parseSseData", () => {
   test("parses data lines and skips DONE", () => {

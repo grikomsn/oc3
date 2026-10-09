@@ -6,4 +6,4 @@ Add a changeset for user-visible changes:
 npm run changeset
 ```
 
-Select `pi-provider-opencode-console` and the appropriate semantic-version bump. Documentation, tests, and repository-maintenance-only changes do not require a changeset.
+Select `@nbrst/oc3` and the appropriate semantic-version bump. Documentation, tests, and repository-maintenance-only changes do not require a changeset.

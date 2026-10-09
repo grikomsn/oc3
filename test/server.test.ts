@@ -2,17 +2,16 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
+import { portOf, tempRoot } from "./helpers";
 
-const HOME = "/tmp/oc3-server-test";
-const UPSTREAM_PORT = 8891;
-const PROXY_PORT = 8892;
+const HOME = tempRoot("oc3-server-test");
 
 let chatRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
 let responsesRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
 
 const upstream = Bun.serve({
   hostname: "127.0.0.1",
-  port: UPSTREAM_PORT,
+  port: 0,
   async fetch(request) {
     const url = new URL(request.url);
     const body = await request.json() as Record<string, unknown>;
@@ -59,6 +58,7 @@ const upstream = Bun.serve({
     return new Response("not found", { status: 404 });
   },
 });
+const UPSTREAM_PORT = portOf(upstream);
 
 async function writeCatalog(): Promise<void> {
   mkdirSync(`${HOME}/.config/oc3`, { recursive: true });
@@ -110,7 +110,7 @@ afterAll(() => {
 
 describe("oc3 proxy server", () => {
   test("bridges chat-completions models to the Responses API", async () => {
-    const handle = await startServer({ port: PROXY_PORT, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -147,7 +147,7 @@ describe("oc3 proxy server", () => {
   });
 
   test("passes Responses-native models through with injected headers", async () => {
-    const handle = await startServer({ port: PROXY_PORT + 1, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -191,7 +191,7 @@ describe("oc3 proxy server", () => {
         baseUrl: `http://127.0.0.1:${UPSTREAM_PORT}/v1`,
       },
     ], zen: [], go: [] }));
-    const handle = await startServer({ port: PROXY_PORT + 2, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -211,7 +211,7 @@ describe("native OpenAI bridge", () => {
     process.env.OPENAI_API_KEY = "sk-test";
     process.env.OC3_OPENAI_BASE_URL = `http://127.0.0.1:${UPSTREAM_PORT}/v1`;
     try {
-      const handle = await startServer({ port: PROXY_PORT + 3, auth });
+      const handle = await startServer({ port: 0, auth });
       const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -237,7 +237,7 @@ describe("native OpenAI bridge", () => {
     writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
     process.env.OC3_OPENAI_FALLBACK_URL = `http://127.0.0.1:${UPSTREAM_PORT}/v1`;
     try {
-      const handle = await startServer({ port: PROXY_PORT + 7, auth });
+      const handle = await startServer({ port: 0, auth });
       const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer sk-user-key" },
@@ -254,7 +254,7 @@ describe("native OpenAI bridge", () => {
 
   test("native fallback 404s when no credentials are available", async () => {
     writeFileSync(`${process.env.OC3_HOME}/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
-    const handle = await startServer({ port: PROXY_PORT + 8, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -267,7 +267,7 @@ describe("native OpenAI bridge", () => {
   test("openai/ models are unavailable without OPENAI_API_KEY", async () => {
     delete process.env.OPENAI_API_KEY;
     writeFileSync(`${HOME}/.config/oc3/models.json`, JSON.stringify({ version: 2, console: [], zen: [], go: [] }));
-    const handle = await startServer({ port: PROXY_PORT + 4, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -280,7 +280,7 @@ describe("native OpenAI bridge", () => {
 
 describe("transport fallbacks", () => {
   test("websocket upgrade attempts get 426 so Codex falls back to HTTP", async () => {
-    const handle = await startServer({ port: PROXY_PORT + 5, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {
       headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" },
     });
@@ -290,7 +290,7 @@ describe("transport fallbacks", () => {
 
   test("accepts zstd-compressed request bodies", async () => {
     await writeCatalog();
-    const handle = await startServer({ port: PROXY_PORT + 6, auth });
+    const handle = await startServer({ port: 0, auth });
     const payload = JSON.stringify({ model: "acme/gpt-model", stream: true, store: false, input: "hi" });
     const compressed = Bun.zstdCompressSync(Buffer.from(payload));
     const response = await fetch(`http://127.0.0.1:${handle.port}/v1/responses`, {

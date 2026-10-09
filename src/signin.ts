@@ -17,6 +17,8 @@ export interface DeviceSignInHooks {
   onDeviceCode?: (code: { userCode: string; verificationUrl: string }) => void;
   /** Polling progress in seconds. */
   onPoll?: (elapsedSeconds: number) => void;
+  /** Aborts polling; the sign-in rejects and nothing is stored. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -33,5 +35,5 @@ export async function deviceSignIn(
   const device = await auth.requestDeviceCode(server);
   hooks.onDeviceCode?.({ userCode: device.userCode, verificationUrl: device.verificationUrl });
   await openBrowser(device.verificationUrl).catch(() => { /* browser open is best effort */ });
-  return await auth.completeDeviceSignIn(device, mode, undefined, hooks.onPoll);
+  return await auth.completeDeviceSignIn(device, mode, hooks.signal, hooks.onPoll);
 }

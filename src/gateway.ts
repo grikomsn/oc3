@@ -8,14 +8,14 @@
 
 import {
   apiBaseForMode,
+  isGatewayProvider,
   minimalGatewayModel,
   modelsFromGatewayProvider,
   type Oc3Model,
   type ProviderSource,
 } from "./models";
-import type { OpenCodeMode } from "./protocol";
+import { GATEWAY_PROVIDER_IDS, providerMode, type OpenCodeMode } from "./protocol";
 
-export const GATEWAY_PROVIDER_IDS = { console: "opencode", go: "opencode-go" } as const;
 export const GATEWAY_MODELS_CATALOG_URL = "https://models.opencode.ai/api.json";
 
 export type GatewayMode = OpenCodeMode;
@@ -39,9 +39,10 @@ function gatewayCatalogUrl(): string {
 
 /** The per-mode service-account key that authorizes one provider's requests. */
 export function gatewayKeyFor(providerId: string, keys: ServiceKeys, envKey?: string): string {
+  const mode = providerMode(providerId);
+  if (!mode) return "";
   const env = envKey ?? process.env.OPENCODE_API_KEY;
-  if (providerId === "opencode-go") return keys.go ?? env ?? "";
-  return keys.console ?? env ?? "";
+  return keys[mode] ?? env ?? "";
 }
 
 /**
@@ -152,7 +153,7 @@ export function freeConsoleModels(models: readonly Oc3Model[]): Oc3Model[] {
  * Narrow allowlist so unrelated models never receive unexpected fields.
  */
 export function gatewayChatTemplateArgs(model: Oc3Model): Record<string, unknown> | undefined {
-  if (!model.providerId.startsWith("opencode")) return undefined;
+  if (!isGatewayProvider(model.providerId)) return undefined;
   const id = model.rawModelId.toLowerCase();
   if (/^kimi-k2-thinking/.test(id) || /^glm-4\.6/.test(id)) {
     return { chat_template_args: { enable_thinking: true } };

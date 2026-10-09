@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Oc3Model } from "./models";
 import { ensureHome, oc3Home } from "./store";
-import { thinkingFamily } from "./reasoning";
+import { thinkingFamily, type ThinkingFamily } from "./reasoning";
 
 export interface ThinkingMetadata {
   supported: boolean;
@@ -25,7 +25,7 @@ export interface RoutingCatalog {
   auto_review_fallback_model?: string;
 }
 
-const FAMILY_LEVELS: Record<string, string[]> = {
+const FAMILY_LEVELS: Record<ThinkingFamily, string[]> = {
   openai: ["none", "low", "medium", "high"],
   deepseek: ["low", "high"],
   glm: ["low", "high", "max"],
@@ -40,13 +40,13 @@ export function thinkingMetadataFor(model: Oc3Model): ThinkingMetadata | undefin
   const family = thinkingFamily(model.rawModelId, model.name);
   if (!family) return undefined;
   // Catalog-declared efforts win; family defaults are the fallback.
-  const levels = model.reasoningEfforts?.length ? model.reasoningEfforts : FAMILY_LEVELS[family] ?? ["low", "medium", "high"];
+  const levels = model.reasoningEfforts?.length ? model.reasoningEfforts : FAMILY_LEVELS[family];
   const values: Record<string, unknown> = {};
   if (family === "qwen" || family === "kimi") values["none"] = false;
   return { supported: true, levels, values: Object.keys(values).length ? values : undefined };
 }
 
-export function writeRoutingCatalog(models: readonly Oc3Model[], path?: string): string {
+export function writeRoutingCatalog(models: readonly Oc3Model[]): string {
   const catalog: RoutingCatalog = {
     models: models.map((model) => {
       const entry: RoutingModel = { slug: model.id };
@@ -56,13 +56,12 @@ export function writeRoutingCatalog(models: readonly Oc3Model[], path?: string):
     }),
   };
   ensureHome();
-  const target = routingCatalogPath(path);
+  const target = routingCatalogPath();
   writeFileSync(target, `${JSON.stringify(catalog, null, 2)}\n`);
   return target;
 }
 
-export function routingCatalogPath(explicit?: string): string {
-  if (explicit) return explicit;
+export function routingCatalogPath(): string {
   return join(oc3Home(), "codex-routing.json");
 }
 

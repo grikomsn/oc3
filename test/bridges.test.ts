@@ -56,7 +56,8 @@ describe("anthropicRequestFromResponses", () => {
     expect(request.system).toBe("Be careful.");
     expect(request.max_tokens).toBe(8_192);
     expect(request.stream).toBe(true);
-    expect(request.thinking).toEqual({ type: "enabled", budget_tokens: 7_168 });
+    // The final assistant turn calls a tool, and manual thinking would need its signed thinking block.
+    expect(request.thinking).toBeUndefined();
     expect(request.tools).toEqual([
       { name: "lookup", description: "Look up state", input_schema: { type: "object" } },
     ]);
@@ -125,14 +126,18 @@ describe("AnthropicStreamToResponses", () => {
     });
   });
 
-  test("emits thinking deltas", () => {
+  test("emits thinking deltas on an open reasoning item", () => {
     const bridge = new AnthropicStreamToResponses("resp_b");
+    const opened = bridge.ingest({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } });
+    expect(opened[0]!.event).toBe("response.output_item.added");
     const events = bridge.ingest({
       type: "content_block_delta",
+      index: 0,
       delta: { type: "thinking_delta", thinking: "checking input" },
     });
     expect(events[0]!.event).toBe("response.reasoning_summary_text.delta");
     expect(events[0]!.data.delta).toBe("checking input");
+    expect(events[0]!.data.item_id).toBe((opened[0]!.data.item as { id: string }).id);
   });
 
   test("converts tool_use blocks into function_call output", () => {
@@ -275,7 +280,9 @@ describe("GoogleStreamToResponses", () => {
     ];
     expect(events.map((event) => event.event)).toEqual([
       "response.created",
+      "response.output_item.added",
       "response.reasoning_summary_text.delta",
+      "response.output_item.done",
       "response.output_item.added",
       "response.output_text.delta",
       "response.output_item.added",
@@ -285,8 +292,8 @@ describe("GoogleStreamToResponses", () => {
       "response.output_item.done",
       "response.completed",
     ]);
-    const callAdded = events[4]!.data.item as Record<string, unknown>;
-    const callDone = events[8]!.data.item as Record<string, unknown>;
+    const callAdded = events[6]!.data.item as Record<string, unknown>;
+    const callDone = events[10]!.data.item as Record<string, unknown>;
     expect(callAdded.id).toBe(callDone.id);
     expect(callDone).toEqual({
       type: "function_call",
@@ -295,10 +302,10 @@ describe("GoogleStreamToResponses", () => {
       name: "lookup",
       arguments: "{\"query\":\"status\"}",
     });
-    const completed = events[9]!.data.response as Record<string, unknown>;
+    const completed = events[11]!.data.response as Record<string, unknown>;
     expect(completed.usage).toEqual({
       input_tokens: 7,
-      output_tokens: 4,
+      output_tokens: 6,
       total_tokens: 13,
       input_tokens_details: { cached_tokens: 0 },
       output_tokens_details: { reasoning_tokens: 2 },

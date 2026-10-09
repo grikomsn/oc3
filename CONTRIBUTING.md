@@ -10,7 +10,7 @@ Thanks for helping improve oc3.
 
 ## Development
 
-Use Bun 1.2 or newer (Node.js 24 for npm scripts):
+Use Bun 1.4.2 (the version CI pins) or newer, and Node.js 24 for npm scripts:
 
 ```sh
 bun install

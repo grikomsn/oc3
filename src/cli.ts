@@ -1,13 +1,18 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
+import { existsSync } from "node:fs";
 import { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { displayName, type Oc3Model } from "./models";
 import { writeCodexCatalog } from "./codex-catalog";
 import { startServer } from "./server";
-import { applyCodexOverrides, codexConfigPath, overridesApplied, restoreCodexOverrides } from "./codex-config";
-import { clearDaemonInfo, daemonRunning, launchDetachedServe, launchChatGptDesktop, readDaemonInfo, removeStaleDaemonFile, serveLogPath, stopDaemon, writeDaemonInfo } from "./daemon";
+import { codexConfigPath, overridesApplied } from "./codex-config";
+import { clearDaemonInfo, daemonRunning, launchChatGptDesktop, readDaemonInfo, readServeLogTail, removeStaleDaemonFile, rotateServeLog, serveLogPath, writeDaemonInfo } from "./daemon";
+import { startAll, stopAll } from "./lifecycle";
 import { codexCatalogPath } from "./store";
+import { parseArgs, parseIntFlag, parseModeFlag, parseOrgChoice, type Flags } from "./cli-args";
+import { maskKey } from "./secrets";
+import type { OpenCodeMode } from "./protocol";
 
 import { deviceSignIn } from "./signin";
 import { DEFAULT_CONSOLE_SERVER } from "./protocol";
@@ -19,32 +24,8 @@ import { runTui } from "./tui";
 declare const OC3_VERSION: string | undefined;
 const version = JSON.parse(typeof OC3_VERSION !== "undefined" ? OC3_VERSION : "\"dev\"") as string;
 
-interface Args {
-  command: string;
-  flags: Record<string, string | boolean>;
-}
-
-function parseArgs(argv: string[]): Args {
-  const [command = "tui", ...rest] = argv;
-  const flags: Record<string, string | boolean> = {};
-  for (let index = 0; index < rest.length; index += 1) {
-    const arg = rest[index] ?? "";
-    if (!arg.startsWith("--")) continue;
-    const key = arg.slice(2);
-    const next = rest[index + 1];
-    if (next !== undefined && !next.startsWith("--")) {
-      flags[key] = next;
-      index += 1;
-    } else {
-      flags[key] = true;
-    }
-  }
-  return { command, flags };
-}
-
-function port(flags: Record<string, string | boolean>): number {
-  const value = Number(flags.port ?? 8788);
-  return Number.isFinite(value) && value > 0 ? value : 8788;
+function port(flags: Flags): number {
+  return parseIntFlag(flags, "port", 8788, { min: 1, max: 65535 });
 }
 
 async function main(): Promise<void> {
@@ -54,7 +35,7 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "login": {
-      const mode = loginMode(flags);
+      const mode = parseModeFlag(flags, "console") ?? "console";
       const server = typeof flags.server === "string" ? flags.server : DEFAULT_CONSOLE_SERVER;
       const session = await deviceSignIn(auth, mode, server, {
         onDeviceCode: ({ userCode, verificationUrl }) => {
@@ -83,12 +64,7 @@ async function main(): Promise<void> {
       return;
     }
     case "logout": {
-      const mode = flags.mode === "go" || flags.mode === "console" ? flags.mode : undefined;
-      if (typeof flags.mode === "string" && !mode) {
-        console.error(`Unknown mode: ${flags.mode} (use console or go)`);
-        process.exitCode = 1;
-        return;
-      }
+      const mode = parseModeFlag(flags);
       if (mode) auth.signOut(mode);
       else { auth.signOut("console"); auth.signOut("go"); }
       console.log("Signed out.");
@@ -102,24 +78,16 @@ async function main(): Promise<void> {
       }
       const setFlag = typeof flags.set === "string" ? flags.set : undefined;
       if (setFlag) {
-        const mode = flags.mode === "go" || flags.mode === "console" ? flags.mode : "console";
-        if (typeof flags.mode === "string" && flags.mode !== mode) {
-          console.error(`Unknown key mode: ${flags.mode} (use console or go)`);
-          process.exitCode = 1;
-          return;
-        }
+        const mode = parseModeFlag(flags) ?? "console";
         saveKeys({ ...loadKeys(), [mode]: setFlag });
         console.log(`OpenCode ${mode} service key saved to OC3_HOME/keys.json (0600).`);
         return;
       }
       const keys = loadKeys();
-      const env = process.env.OPENCODE_API_KEY ? "OPENCODE_API_KEY" : undefined;
-      const consoleKey = keys.console ?? env;
-      const goKey = keys.go ?? env;
-      const show = (value: string | undefined) => value ? `set (${value.slice(0, 4)}…${value.slice(-4)})` : "not set";
-      console.log(`console: ${show(consoleKey)}`);
-      console.log(`go:      ${show(goKey)}`);
-      if (!consoleKey) console.log("Configure with: oc3 keys --set <console-service-key>  (from https://opencode.ai/auth)");
+      const envKey = process.env.OPENCODE_API_KEY || undefined;
+      console.log(`console: ${describeKey(keys.console, envKey)}`);
+      console.log(`go:      ${describeKey(keys.go, envKey)}`);
+      if (!keys.console && !envKey) console.log("Configure with: oc3 keys --set <console-service-key>  (from https://opencode.ai/auth)");
       return;
     }
     case "usage": {
@@ -154,12 +122,7 @@ async function main(): Promise<void> {
       return;
     }
     case "org": {
-      const mode = flags.mode === "go" ? "go" : "console";
-      if (typeof flags.mode === "string" && flags.mode !== "console" && flags.mode !== "go") {
-        console.error(`Unknown mode: ${flags.mode} (use console or go)`);
-        process.exitCode = 1;
-        return;
-      }
+      const mode: OpenCodeMode = parseModeFlag(flags) ?? "console";
       const session = auth.getSession(mode);
       if (!session) { console.log(`Not signed in to OpenCode ${mode}. Run: oc3 login --mode ${mode}`); process.exitCode = 1; return; }
       if (typeof flags.org === "string" && flags.org) {
@@ -176,11 +139,11 @@ async function main(): Promise<void> {
       for (const error of refreshed?.errors ?? []) console.error(`Warning: ${error}`);
       if (!models.length) {
         if (refreshed?.errors.length) console.error(refreshed.errors[0]);
-        console.log("No models cached. Run: oc3 models --refresh (Console sign-in optional; Zen/Go catalogs are public)");
+        console.log("No models cached. Run: oc3 models --refresh (Console sign-in optional; the public OpenCode catalogs are used otherwise)");
         process.exitCode = 1;
         return;
       }
-      await writeCodexCatalog(models);
+      writeCodexCatalog(models);
       console.log(`Found ${models.length} models. Codex catalog written.`);
       for (const model of models) {
         const cost = costLabel(model.cost);
@@ -194,6 +157,7 @@ async function main(): Promise<void> {
       console.log(`oc3 proxy listening on http://127.0.0.1:${handle.port}`);
       console.log(`Codex profile base_url: http://127.0.0.1:${handle.port}/v1`);
       process.on("SIGINT", () => { handle.stop(); clearDaemonInfo(); process.exit(0); });
+      process.on("SIGTERM", () => { handle.stop(); clearDaemonInfo(); process.exit(0); });
       return;
     }
     case "start": {
@@ -211,39 +175,20 @@ async function main(): Promise<void> {
         models = refreshed.models;
         for (const error of refreshed.errors) console.error(`Warning: ${error}`);
       }
-      await writeCodexCatalog(models);
-      const overrides = { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${p}/v1` };
-      const result = applyCodexOverrides(overrides);
-      console.log(`Config overrides ${result.changed ? `applied to ${codexConfigPath()}` : "already in place"} (backup: ${result.backupCreated ? "created" : "kept"})`);
-      const cliEntry = Bun.argv[1]?.startsWith("/$bunfs/") ? undefined : (Bun.argv[1] ?? "src/cli.ts");
-      const childPid = launchDetachedServe(cliEntry, p);
-      const ready = await waitForHealth(p, 10_000);
-      if (!ready) {
-        console.error("oc3 proxy did not become healthy in time. Check `oc3 logs`.");
-        process.exitCode = 1;
-        return;
-      }
-      writeDaemonInfo({ pid: childPid, port: p });
-      console.log(`oc3 proxy running on http://127.0.0.1:${p} (pid ${childPid}, detached)`);
-      if (flags["no-launch"] !== true) {
-        const launched = launchChatGptDesktop();
-        console.log(launched ? "Booted ChatGPT desktop." : "Could not launch ChatGPT desktop (open -a ChatGPT).");
-      }
-      console.log("Logs: `oc3 logs`  Status: `oc3 status`  Restore: `oc3 stop`");
+      if (!models.length) console.error("Warning: no models are available; Codex will list none until `oc3 models --refresh` succeeds.");
+      writeCodexCatalog(models);
+      rotateServeLog();
+      await startProxy(p, flags);
       return;
     }
     case "logs": {
-      const lines = Number(flags.lines ?? 30);
-      const path = serveLogPath();
-      if (!existsSync(path)) { console.log("No serve log yet. Start with: oc3 start"); return; }
-      const content = readFileSync(path, "utf8").split("\n");
-      console.log(content.slice(Math.max(0, content.length - Math.max(1, lines))).join("\n"));
+      const lines = parseIntFlag(flags, "lines", 30, { min: 1, max: 10_000 });
+      if (!existsSync(serveLogPath())) { console.log("No serve log yet. Start with: oc3 start"); return; }
+      console.log(readServeLogTail(lines));
       return;
     }
     case "stop": {
-      removeStaleDaemonFile();
-      const stopped = stopDaemon();
-      const restored = restoreCodexOverrides();
+      const { stopped, restored } = await stopAll();
       if (stopped) console.log("oc3 proxy stopped.");
       if (restored.changed) console.log(`Config restored from backup (${codexConfigPath()}).`);
       else if (!restored.hadBackup) console.log("No oc3 overrides found to restore.");
@@ -261,7 +206,8 @@ async function main(): Promise<void> {
       return;
     }
     case "tui": {
-      await runTui({ port: port(flags), auth });
+      const cleanup = await runTui({ port: port(flags), auth });
+      process.once("exit", cleanup);
       return;
     }
     case "help":
@@ -283,6 +229,36 @@ async function main(): Promise<void> {
   }
 }
 
+/** Starts the detached proxy and reports the outcome; rollback lives in startAll. */
+async function startProxy(p: number, flags: Flags): Promise<void> {
+  const cliEntry = Bun.argv[1]?.startsWith("/$bunfs/") ? undefined : (Bun.argv[1] ?? "src/cli.ts");
+  const outcome = await startAll({
+    port: p,
+    cliEntry,
+    overrides: { model_catalog_json: codexCatalogPath(), openai_base_url: `http://127.0.0.1:${p}/v1` },
+  });
+  if (!outcome.ok) {
+    console.error(outcome.reason === "unhealthy"
+      ? "oc3 proxy did not become healthy in time. Check `oc3 logs`."
+      : `oc3 could not start the proxy: ${outcome.error ?? "unknown error"}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Config overrides ${outcome.applied.changed ? `applied to ${codexConfigPath()}` : "already in place"} (backup: ${outcome.applied.backupCreated ? "created" : "kept"})`);
+  console.log(`oc3 proxy running on http://127.0.0.1:${p} (pid ${outcome.pid}, detached)`);
+  if (flags["no-launch"] !== true) {
+    const launched = launchChatGptDesktop();
+    console.log(launched ? "Booted ChatGPT desktop." : "Could not launch ChatGPT desktop (open -a ChatGPT).");
+  }
+  console.log("Logs: `oc3 logs`  Status: `oc3 status`  Restore: `oc3 stop`");
+}
+
+function describeKey(stored: string | undefined, envKey: string | undefined): string {
+  if (stored) return `set (${maskKey(stored)})`;
+  if (envKey) return `set from OPENCODE_API_KEY (${maskKey(envKey)})`;
+  return "not set";
+}
+
 function backendTag(model: Oc3Model): string {
   const match = /\[([^\]]+)\]$/.exec(displayName(model));
   return match ? `[${match[1]}]` : "";
@@ -299,51 +275,27 @@ function trimNumber(value: number): string {
   return Number(value.toFixed(2)).toString();
 }
 
+/** Reads one line from the org picker; no answer within 30 s picks the first org. */
 async function promptOrgChoice(count: number): Promise<number | undefined> {
-  process.stdout.write("Org number [1]: ");
-  const answer = await new Promise<string>((resolve) => {
-    const chunks: Buffer[] = [];
-    const onData = (chunk: Buffer) => chunks.push(chunk);
-    process.stdin.once("data", onData);
-    process.stdin.once("end", () => {
-      process.stdin.removeListener("data", onData);
-      resolve("");
-    });
-    setTimeout(() => {
-      process.stdin.removeListener("data", onData);
-      resolve("");
-    }, 30_000);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<string>((resolve) => {
+    timer = setTimeout(() => resolve(""), 30_000);
   });
-  const value = answer.trim();
-  if (!value) return 0;
-  const index = Number.parseInt(value, 10) - 1;
-  return index >= 0 && index < count ? index : undefined;
-}
-
-async function waitForHealth(port: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
-      if (response.ok) return true;
-    } catch { /* not ready yet */ }
-    await Bun.sleep(200);
+  try {
+    const answer = await Promise.race([rl.question("Org number [1]: "), timeout]);
+    return parseOrgChoice(answer, count);
+  } finally {
+    clearTimeout(timer);
+    rl.close();
   }
-  return false;
-}
-
-function loginMode(flags: Record<string, string | boolean>): "console" | "go" {
-  if (typeof flags.mode === "string" && flags.mode !== "console" && flags.mode !== "go") {
-    throw new Error(`Unknown mode: ${flags.mode} (use console or go)`);
-  }
-  return flags.mode === "go" ? "go" : "console";
 }
 
 const USAGE = `oc3 — OpenCode Console proxy for Codex / ChatGPT desktop
 
 Usage:
   oc3                     Open the TUI dashboard
-                          (1 Models · 2 Account · 3 Gateway · 4 Proxy · 5 Logs)
+                          (1 Models · 2 Account · 3 Runtime)
   oc3 login [--mode console|go] [--org ID]
                           Device-code sign in to OpenCode Console (slot: console, or go)
   oc3 whoami              Show signed-in accounts for every mode slot
@@ -351,7 +303,7 @@ Usage:
                           List or select the active organization for a slot
   oc3 models [--refresh]  List models and regenerate the Codex catalog
   oc3 keys [--set KEY]    Store a service key for console (default) or go: --set KEY --mode go
-                          (--clear wipes both; TUI Gateway view for interactive use)
+                          (--clear wipes both; TUI Account view for interactive use)
   oc3 usage               Show OpenCode Go subscription quota
   oc3 start [--port N]    Apply overrides, start detached proxy, boot ChatGPT desktop
                           (--no-launch skips booting ChatGPT desktop)
@@ -365,7 +317,12 @@ Environment:
   OC3_HOME            State directory (default ~/.config/oc3)
   OPENAI_API_KEY      Enables bridging native OpenAI models (openai/<model> slugs)
   OC3_OPENAI_MODELS   Comma-separated OpenAI model ids to expose
-  OPENCODE_API_KEY      OpenCode service key fallback (alternative to oc3 keys)
+  OPENCODE_API_KEY    OpenCode service key fallback (alternative to oc3 keys)
 `;
 
-await main();
+try {
+  await main();
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}

@@ -1,7 +1,13 @@
 import type { EndpointKind } from "./protocol";
 
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ThinkingFamily = "openai" | "deepseek" | "glm" | "kimi" | "minimax" | "mimo" | "qwen";
+
+const REASONING_EFFORTS: ReadonlySet<string> = new Set<ReasoningEffort>(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+export function isReasoningEffort(value: string): value is ReasoningEffort {
+  return REASONING_EFFORTS.has(value);
+}
 
 export function thinkingFamily(modelId: string, catalogFamily?: string): ThinkingFamily | undefined {
   const id = bareModelId(modelId);
@@ -51,7 +57,6 @@ export function reasoningWirePayload(family: ThinkingFamily, modelId: string, en
       if (off) return {};
       return { reasoning_effort: effort };
     case "deepseek":
-      if (off) return {};
       return {};
     case "openai":
       return { reasoning_effort: effort };

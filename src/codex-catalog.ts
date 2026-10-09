@@ -41,7 +41,7 @@ function defaultReasoningLevel(model: Oc3Model): string {
 
 const FALLBACK_BASE_INSTRUCTIONS = "You are a helpful coding agent. Complete the user's task using the provided tools.";
 
-export async function writeCodexCatalog(models: readonly Oc3Model[]): Promise<void> {
+export function writeCodexCatalog(models: readonly Oc3Model[]): void {
   const baseInstructions = FALLBACK_BASE_INSTRUCTIONS;
   const catalog = {
     models: models.map((model, index) => ({
