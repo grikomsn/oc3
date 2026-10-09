@@ -100,7 +100,7 @@ jobs:
       - name: Prepare npm platform packages
         if: steps.release.outputs.release == 'true' || steps.release.outputs.publish == 'true'
         run: |
-          VERSION="${{ steps.release.outputs.version }}"
+          export VERSION="${{ steps.release.outputs.version }}"
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             os="${target%%-*}"
             case "$target" in
