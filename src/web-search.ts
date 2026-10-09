@@ -5,12 +5,7 @@
 
 import type { Oc3Model } from "./models";
 import { userAgent } from "./protocol";
-
-export interface WebSearchResult {
-  ok: boolean;
-  text: string;
-  provider: string;
-}
+import { SseParser } from "./sse-parser";
 
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
 const PARALLEL_MCP_URL = "https://search.parallel.ai/mcp";
@@ -64,7 +59,8 @@ export function selectSearchProvider(sessionId: string): "exa" | "parallel" {
   return hash % 2 === 0 ? "exa" : "parallel";
 }
 
-export async function executeWebSearch(query: string, sessionId: string): Promise<string> {
+// Never throws: failures come back as tool output so one bad search does not fail the turn.
+export async function executeWebSearch(query: string, sessionId: string, timeoutMs = SEARCH_TIMEOUT_MS): Promise<string> {
   const provider = selectSearchProvider(sessionId);
   const url = mcpUrl(provider);
   const toolName = provider === "parallel" ? "web_search" : "web_search_exa";
@@ -79,51 +75,58 @@ export async function executeWebSearch(query: string, sessionId: string): Promis
   if (provider === "parallel" && process.env.PARALLEL_API_KEY) {
     headers["Authorization"] = `Bearer ${process.env.PARALLEL_API_KEY}`;
   }
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: args } }),
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    return `web search failed (${response.status})`;
-  }
-  const contentType = response.headers.get("content-type") ?? "";
-  const raw = await response.text();
-  if (contentType.includes("text/event-stream")) {
-    let text = "";
-    for (const line of raw.split("\n")) {
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-      try {
-        const value = JSON.parse(payload) as Record<string, unknown>;
-        const extracted = extractMcpText(value);
-        if (extracted) { text = extracted; break; }
-      } catch { /* skip malformed lines */ }
-    }
-    return text || `web search returned no results for: ${query}`;
-  }
+  let contentType: string;
+  let raw: string;
   try {
-    const value = JSON.parse(raw);
-    return extractMcpText(value) ?? `web search returned no results for: ${query}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: args } }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return `web search failed: HTTP ${response.status}`;
+    contentType = response.headers.get("content-type") ?? "";
+    raw = await response.text();
+  } catch (error) {
+    return `web search failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  if (contentType.includes("text/event-stream")) {
+    const parser = new SseParser();
+    for (const block of [...parser.push(raw), ...parser.finish()]) {
+      const text = mcpText(block.data);
+      if (text) return text;
+    }
+    return `web search returned no results for: ${query}`;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
   } catch {
     return `web search returned unparseable output for: ${query}`;
   }
+  return extractMcpText(value) ?? `web search returned no results for: ${query}`;
+}
 
-  function extractMcpText(value: unknown): string | undefined {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const result = (value as Record<string, unknown>).result;
-    if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
-    const content = (result as Record<string, unknown>).content;
-    if (!Array.isArray(content)) return undefined;
-    for (const part of content) {
-      if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text"
-        && typeof (part as Record<string, unknown>).text === "string"
-        && ((part as Record<string, unknown>).text as string).trim()) {
-        return (part as Record<string, unknown>).text as string;
-      }
-    }
+function mcpText(payload: string): string | undefined {
+  try {
+    return extractMcpText(JSON.parse(payload));
+  } catch {
     return undefined;
   }
+}
+
+function extractMcpText(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const result = (value as Record<string, unknown>).result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+  const content = (result as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content) {
+    if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text"
+      && typeof (part as Record<string, unknown>).text === "string"
+      && ((part as Record<string, unknown>).text as string).trim()) {
+      return (part as Record<string, unknown>).text as string;
+    }
+  }
+  return undefined;
 }

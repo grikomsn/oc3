@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { coerceToolArguments, isCompletePatchEnvelope, normalizeApplyPatchDelimiters } from "../src/tool-args-repair";
-import { analyzeHttp400ForRetry, isTransientServerError, retryDelayMs } from "../src/retry";
-import { SseParser } from "../src/sse-parser";
 
 describe("coerceToolArguments", () => {
   const schema = {
@@ -52,6 +50,41 @@ describe("coerceToolArguments", () => {
     expect(coerceToolArguments("not json", schema, "shell")).toBe("not json");
     expect(coerceToolArguments('{"count":120000.0}', undefined, "shell")).toBe('{"count":120000.0}');
   });
+
+  test("splices only repaired literals so large integers survive exactly", () => {
+    const wide = { type: "object", properties: { id: { type: "string" }, count: { type: "integer" } } };
+    expect(coerceToolArguments('{"id":12345678901234567890,"count":5.0}', wide, "shell"))
+      .toBe('{"id":12345678901234567890,"count":5}');
+    expect(coerceToolArguments('{ "count" : 5.0 , "id": 12345678901234567890 }', wide, "shell"))
+      .toBe('{ "count" : 5 , "id": 12345678901234567890 }');
+  });
+
+  test("ignores number-like text inside strings and repairs the last duplicate key", () => {
+    expect(coerceToolArguments('{"note":"see \\"5.0\\"","count":5.0}', schema, "shell"))
+      .toBe('{"note":"see \\"5.0\\"","count":5}');
+    expect(coerceToolArguments('{"count":1.0,"count":2.0}', schema, "shell")).toBe('{"count":1.0,"count":2}');
+  });
+
+  test("reads object properties through anyOf, allOf, and additionalProperties", () => {
+    const anyOfRoot = { anyOf: [{ type: "object", properties: { count: { type: "integer" } } }, { type: "null" }] };
+    expect(coerceToolArguments('{"count":5.0}', anyOfRoot, "shell")).toBe('{"count":5}');
+    const nested = { type: "object", properties: { opts: anyOfRoot } };
+    expect(coerceToolArguments('{"opts":{"count":5.0}}', nested, "shell")).toBe('{"opts":{"count":5}}');
+    const allOf = { allOf: [{ type: "object", properties: { a: { type: "integer" } } }, { type: "object", properties: { b: { type: "integer" } } }] };
+    expect(coerceToolArguments('{"a":1.0,"b":2.0}', allOf, "shell")).toBe('{"a":1,"b":2}');
+    const extra = { anyOf: [{ type: "object", additionalProperties: { type: "integer" } }] };
+    expect(coerceToolArguments('{"anything":2.0}', extra, "shell")).toBe('{"anything":2}');
+  });
+
+  test("resolves $ref targets inside composition branches and array items", () => {
+    const refBranch = {
+      anyOf: [{ $ref: "#/$defs/inner" }, { type: "null" }],
+      $defs: { inner: { type: "object", properties: { depth: { type: "integer" } } } },
+    };
+    expect(coerceToolArguments('{"depth":3.0}', refBranch, "shell")).toBe('{"depth":3}');
+    const ids = { type: "object", properties: { ids: { anyOf: [{ type: "array", items: { type: "integer" } }, { type: "null" }] } } };
+    expect(coerceToolArguments('{"ids":[1.0,2.0]}', ids, "shell")).toBe('{"ids":[1,2]}');
+  });
 });
 
 describe("apply_patch envelope repair", () => {
@@ -65,48 +98,5 @@ describe("apply_patch envelope repair", () => {
     const plain = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch";
     expect(normalizeApplyPatchDelimiters(plain)).toBe(plain);
     expect(isCompletePatchEnvelope("no patch here")).toBe(false);
-  });
-});
-
-describe("retry analysis", () => {
-  test("strips fields the upstream rejected", () => {
-    const body = { model: "m", temperature: 0.7 };
-    const patch = analyzeHttp400ForRetry("invalid temperature value", body);
-    expect(patch?.reason).toContain("temperature");
-    expect(patch?.body).toEqual({ model: "m" });
-  });
-
-  test("patches context overflow by reducing max_tokens", () => {
-    const patch = analyzeHttp400ForRetry(
-      "This model's maximum context length is 128000 tokens. However, you requested 130000 tokens (120000 in the messages, 10000 in the completion).",
-      { max_tokens: 10000 },
-    );
-    expect(patch?.body.max_tokens).toBeLessThan(10000);
-  });
-
-  test("classifies transient failures", () => {
-    expect(isTransientServerError(503, "")).toBe(true);
-    expect(isTransientServerError(400, "")).toBe(false);
-    expect(retryDelayMs(0)).toBe(250);
-    expect(retryDelayMs(3)).toBe(2000);
-  });
-});
-
-describe("SseParser", () => {
-  test("handles CRLF and multi-line data", () => {
-    const parser = new SseParser();
-    const blocks = parser.push('event: response.created\r\ndata: {"type":"a"}\r\n\r\ndata: {"type":"b"}\n\n');
-    expect(blocks).toHaveLength(2);
-    expect(JSON.parse(blocks[0]!.data).type).toBe("a");
-  });
-
-  test("flushes a final unterminated block", () => {
-    const parser = new SseParser();
-    expect(parser.push('data: {"type":"x"}\n\n')).toHaveLength(1);
-    expect(parser.push("data: {\"type\":\"y\"}")).toHaveLength(0);
-    const tail = parser.finish();
-    expect(tail).toHaveLength(1);
-    expect(JSON.parse(tail[0]!.data).type).toBe("y");
-    expect(parser.finish()).toHaveLength(0);
   });
 });

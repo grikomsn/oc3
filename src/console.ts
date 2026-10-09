@@ -49,13 +49,14 @@ export async function refreshModels(auth: OpenCodeAuth): Promise<RefreshResult> 
   }
   // Gateway discovery carries the credential of each slot — the same
   // key > slot-session precedence as request routing, in one place.
-  const { consoleToken, goToken } = await discoveryTokens(auth);
+  const discovery = await discoveryTokens(auth);
+  for (const message of discovery.errors) if (!errors.includes(message)) errors.push(message);
   const refreshed = await refreshGatewayCatalogs({
     skipConsole: auth.isSignedIn("console"),
-    consoleToken,
-    goToken,
+    consoleToken: discovery.consoleToken,
+    goToken: discovery.goToken,
   });
-  errors.push(...refreshed.errors);
+  for (const message of refreshed.errors) if (!errors.includes(message)) errors.push(message);
   // A signed-in session replaces the public Console discovery with the org
   // catalog; on org fetch failure the cached section keeps serving.
   const cache = loadCatalogCache();

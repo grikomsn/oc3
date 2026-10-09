@@ -1,17 +1,11 @@
 // Request normalization for ChatGPT desktop / Codex traffic, adapted from
 // ollama's internal/proxy/codex_desktop_normalize.go and _autoreview.go.
 
-import type { Oc3Model } from "./models";
+import { modelKey, type Oc3Model } from "./models";
 import { normalizeReasoningEffort, type ThinkingMetadata } from "./routing-catalog";
-import { reasoningWirePayload, thinkingFamily } from "./reasoning";
+import { isReasoningEffort, reasoningWirePayload, thinkingFamily } from "./reasoning";
 
 export const AUTO_REVIEW_MODEL = "codex-auto-review";
-export const GUARDIAN_TOOL_NAME = "submit_guardian_decision";
-
-export function modelKey(slug: string): string {
-  // Bracketed backend tags ("model [Zen]") are display aliases, stripped here.
-  return slug.trim().toLowerCase().replace(/\[.*\]$/, "").trim();
-}
 
 // --- Full-Access exec tool normalization ---
 // When Codex runs with sandbox_mode danger-full-access, strip require_escalated
@@ -54,11 +48,6 @@ export function normalizeFullAccessExecTool(body: Record<string, unknown>, sandb
 }
 
 // --- auto-review alias resolution ---
-
-export interface TurnMetadata {
-  turnId?: string;
-  parentTurnId?: string;
-}
 
 export function extractTurnMetadata(body: Record<string, unknown>): { turnId?: string; parentTurnId?: string } {
   const metadata = body.client_metadata;
@@ -170,7 +159,7 @@ export function normalizeInputItems(body: Record<string, unknown>): { body: Reco
         call_id: record.call_id ?? record.id,
         name: record.name,
         input: record.input,
-        arguments: typeof record.input === "string" ? record.input : JSON.stringify(record.input ?? {}),
+        arguments: typeof record.input === "string" ? JSON.stringify({ input: record.input }) : JSON.stringify(record.input ?? {}),
       };
     }
     if (record.type === "custom_tool_call_output") {
@@ -185,7 +174,9 @@ export function normalizeInputItems(body: Record<string, unknown>): { body: Reco
 // --- reasoning effort normalization against a model's thinking metadata ---
 
 export function normalizeReasoningForModel(body: Record<string, unknown>, model: Oc3Model, thinking: ThinkingMetadata | undefined): Record<string, unknown> {
-  if (!thinking || !thinking.supported) {
+  // A reasoning-capable model with no known family keeps its effort for the generic wire.
+  const genericWire = !thinking && model.reasoning;
+  if (!genericWire && (!thinking || !thinking.supported)) {
     if (!("reasoning" in body)) return body;
     const next = { ...body };
     delete next.reasoning;
@@ -221,10 +212,10 @@ export function applyReasoningWire(body: Record<string, unknown>, model: Oc3Mode
   delete next.reasoning;
   if (typeof effort !== "string" || !effort) return next;
   const family = thinkingFamily(model.rawModelId, model.name);
-  if (!family) {
+  if (!family || !isReasoningEffort(effort)) {
     next.reasoning_effort = effort;
     return next;
   }
-  Object.assign(next, reasoningWirePayload(family, model.rawModelId, model.endpoint, effort as never));
+  Object.assign(next, reasoningWirePayload(family, model.rawModelId, model.endpoint, effort));
   return next;
 }

@@ -22,6 +22,13 @@ export function nativeOpenAiBase(): string {
 export type EndpointKind = "chat-completions" | "messages" | "responses" | "google";
 /** Upstream merged the Zen provider into Console; the two modes are console | go. */
 export type OpenCodeMode = "console" | "go";
+/** The first-party OpenCode provider id each mode's gateway serves. */
+export const GATEWAY_PROVIDER_IDS: Record<OpenCodeMode, string> = { console: "opencode", go: "opencode-go" };
+
+/** The mode slot for a gateway provider id; undefined for every other provider. */
+export function providerMode(providerId: string): OpenCodeMode | undefined {
+  return (Object.keys(GATEWAY_PROVIDER_IDS) as OpenCodeMode[]).find((mode) => GATEWAY_PROVIDER_IDS[mode] === providerId);
+}
 
 export interface ConsoleOrg {
   id: string;
@@ -71,6 +78,14 @@ export function buildAuthHeaders(endpoint: EndpointKind, token: string): Record<
   return { Authorization: `Bearer ${token}` };
 }
 
+// Catalog headers may not carry credentials: a copy under any casing would ride
+// beside the injected one (or replace it), so these names are dropped first.
+const CREDENTIAL_HEADERS = new Set(["authorization", "x-api-key", "x-goog-api-key", "cookie"]);
+
+function withoutCredentialHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => !CREDENTIAL_HEADERS.has(name.toLowerCase())));
+}
+
 export function buildRequestHeaders(
   endpoint: EndpointKind,
   token: string,
@@ -80,7 +95,7 @@ export function buildRequestHeaders(
   additionalHeaders: Readonly<Record<string, string>> = {},
 ): Record<string, string> {
   return {
-    ...additionalHeaders,
+    ...withoutCredentialHeaders(additionalHeaders),
     ...buildAuthHeaders(endpoint, token),
     Accept: "text/event-stream, application/json",
     "Content-Type": "application/json",

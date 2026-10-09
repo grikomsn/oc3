@@ -59,7 +59,7 @@ describe("normalizeInputItems", () => {
     expect(changed).toBe(true);
     expect((body.input as unknown[])[0]).toEqual({
       type: "function_call", id: "i1", call_id: "c1", name: "apply_patch",
-      input: "*** Begin Patch", arguments: "*** Begin Patch",
+      input: "*** Begin Patch", arguments: JSON.stringify({ input: "*** Begin Patch" }),
     });
     expect((body.input as unknown[])[1]).toEqual({ type: "function_call_output", call_id: "c1", output: "done" });
   });
@@ -101,22 +101,28 @@ describe("cross-provider history sanitation", () => {
     ],
   };
 
-  test("drops backend-encrypted reasoning items on backend-family switches", () => {
-    const { body: next, changed } = sanitizeCrossProviderHistory(body, "zen", "console");
+  test("drops backend-encrypted reasoning items on console-to-go switches", () => {
+    const { body: next, changed } = sanitizeCrossProviderHistory(body, "console", "go");
     expect(changed).toBe(true);
     const input = next.input as Array<Record<string, unknown>>;
     expect(input).toHaveLength(3);
     expect(input.find((item) => item.type === "reasoning" && item.id === "reasoning_plain")).toBeDefined();
   });
 
+  test("drops backend-encrypted reasoning items on go-to-console switches", () => {
+    const { body: next, changed } = sanitizeCrossProviderHistory(body, "go", "console");
+    expect(changed).toBe(true);
+    expect((next.input as Array<Record<string, unknown>>).some((item) => item.id === "rs_1234")).toBe(false);
+  });
+
   test("keeps history when the backend family is unchanged or unknown", () => {
-    expect(sanitizeCrossProviderHistory(body, "zen", "zen").changed).toBe(false);
-    expect(sanitizeCrossProviderHistory(body, undefined, "zen").changed).toBe(false);
+    expect(sanitizeCrossProviderHistory(body, "go", "go").changed).toBe(false);
+    expect(sanitizeCrossProviderHistory(body, undefined, "go").changed).toBe(false);
   });
 
   test("keeps plain reasoning summaries across families", () => {
     const plainOnly = { input: [{ type: "reasoning", id: "reasoning_plain", summary: [] }] };
-    const { body: next, changed } = sanitizeCrossProviderHistory(plainOnly, "zen", "console");
+    const { body: next, changed } = sanitizeCrossProviderHistory(plainOnly, "go", "console");
     expect(changed).toBe(false);
     expect(next.input).toHaveLength(1);
   });
@@ -125,9 +131,9 @@ describe("cross-provider history sanitation", () => {
 describe("turn model cache groups", () => {
   test("remembers and reports the backend family per turn", () => {
     const cache = new TurnModelCache(4);
-    cache.remember("t1", "zen/gpt", "zen");
+    cache.remember("t1", "opencode-go/kimi", "go");
     cache.remember("t2", "console/claude", "console");
-    expect(cache.lookup("t1")?.group).toBe("zen");
+    expect(cache.lookup("t1")?.group).toBe("go");
     expect(cache.lookup("t2")?.group).toBe("console");
     expect(cache.lookup("missing")).toBeUndefined();
   });

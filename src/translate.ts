@@ -1,7 +1,9 @@
 import type { Oc3Model } from "./models";
 import { newId } from "./protocol";
-import { reasoningWirePayload, thinkingFamily, type ReasoningEffort } from "./reasoning";
 import { truncatedStopReason } from "./stop-reason";
+import { asRecord, zeroUsage, type EmittedEvent } from "./bridge-common";
+
+export type { EmittedEvent };
 import { coerceToolArguments, isCompletePatchEnvelope, normalizeApplyPatchDelimiters } from "./tool-args-repair";
 
 export const EMPTY_TOOL_OUTPUT_ANNOTATION =
@@ -31,6 +33,7 @@ export interface ChatCompletionRequest {
   max_tokens?: number;
   tools?: Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }>;
   tool_choice?: "auto" | "required" | "none" | { type: "function"; function: { name: string } };
+  parallel_tool_calls?: true;
 }
 
 export function responsesRequestToChat(body: Record<string, unknown>, model: Oc3Model): ChatCompletionRequest {
@@ -39,8 +42,9 @@ export function responsesRequestToChat(body: Record<string, unknown>, model: Oc3
   if (instructions) messages.push({ role: "system", content: instructions });
 
   const input = Array.isArray(body.input) ? body.input : [body.input ?? ""];
+  const callIds: string[] = [];
   for (const item of input) {
-    appendResponsesItem(messages, item);
+    appendResponsesItem(messages, item, callIds);
   }
 
   const tools = Array.isArray(body.tools) ? (body.tools as ResponsesTool[]) : [];
@@ -67,25 +71,12 @@ export function responsesRequestToChat(body: Record<string, unknown>, model: Oc3
   if (chatTools.length) {
     request.tools = chatTools;
     request.tool_choice = toolChoice(body.tool_choice);
-    if (body.parallel_tool_calls === true) {
-      (request as unknown as Record<string, unknown>).parallel_tool_calls = true;
-    }
-  }
-
-  const reasoning = recordField(body.reasoning);
-  const effort = reasoning && typeof reasoning.effort === "string" ? reasoning.effort as ReasoningEffort : undefined;
-  if (effort) {
-    const family = thinkingFamily(model.rawModelId, model.name);
-    if (family) {
-      Object.assign(request, reasoningWirePayload(family, model.rawModelId, "chat-completions", effort));
-    } else {
-      (request as unknown as Record<string, unknown>).reasoning_effort = effort;
-    }
+    if (body.parallel_tool_calls === true) request.parallel_tool_calls = true;
   }
   return request;
 }
 
-function appendResponsesItem(messages: ChatCompletionMessage[], item: unknown): void {
+function appendResponsesItem(messages: ChatCompletionMessage[], item: unknown, callIds: string[]): void {
   if (typeof item === "string") {
     messages.push({ role: "user", content: item });
     return;
@@ -94,12 +85,13 @@ function appendResponsesItem(messages: ChatCompletionMessage[], item: unknown): 
   const record = item as Record<string, unknown>;
   const type = str(record.type) ?? "message";
   if (type === "message") {
-    const role = str(record.role) === "assistant" ? "assistant" : str(record.role) === "system" || str(record.role) === "developer" ? "system" : "user";
+    const role = chatRole(str(record.role));
     messages.push({ role, content: contentToParts(record.content), ...(role === "assistant" && str(record.reasoning_content) ? { reasoning_content: str(record.reasoning_content) } : {}) });
     return;
   }
   if (type === "function_call" || type === "local_shell_call") {
     const callId = str(record.call_id) ?? str(record.id) ?? `call_${messages.length}`;
+    callIds.push(callId);
     let name = str(record.name) ?? "";
     let args = str(record.arguments) ?? "{}";
     if (type === "local_shell_call") {
@@ -120,7 +112,7 @@ function appendResponsesItem(messages: ChatCompletionMessage[], item: unknown): 
     const text = contentToText(record.output);
     messages.push({
       role: "tool",
-      tool_call_id: str(record.call_id) ?? "call",
+      tool_call_id: str(record.call_id) ?? callIds.at(-1) ?? "call",
       content: text.trim() ? text : EMPTY_TOOL_OUTPUT_ANNOTATION,
     });
     return;
@@ -128,8 +120,15 @@ function appendResponsesItem(messages: ChatCompletionMessage[], item: unknown): 
   if (type === "reasoning") return;
   const fallbackRole = str(record.role);
   if (fallbackRole) {
-    messages.push({ role: fallbackRole === "assistant" ? "assistant" : "user", content: contentToParts(record.content) });
+    messages.push({ role: chatRole(fallbackRole), content: contentToParts(record.content) });
   }
+}
+
+// Responses `developer` instructions carry system-level authority, so they map to the chat `system` role.
+function chatRole(role: string | undefined): "system" | "user" | "assistant" {
+  if (role === "assistant") return "assistant";
+  if (role === "system" || role === "developer") return "system";
+  return "user";
 }
 
 function contentToParts(content: unknown): string | Array<Record<string, unknown>> {
@@ -142,7 +141,8 @@ function contentToParts(content: unknown): string | Array<Record<string, unknown
     const item = part as Record<string, unknown>;
     const type = str(item.type) ?? "";
     if (type === "input_text" || type === "output_text" || type === "text" || type === "refusal") {
-      if (str(item.text)) parts.push({ type: "text", text: item.text });
+      const text = type === "refusal" ? item.refusal : item.text;
+      if (str(text)) parts.push({ type: "text", text });
     } else if (type === "input_image") {
       const url = typeof item.image_url === "string" ? item.image_url : str((item.image_url as Record<string, unknown> | undefined)?.url);
       if (url) parts.push({ type: "image_url", image_url: { url } });
@@ -169,18 +169,11 @@ function toolChoice(value: unknown): "auto" | "required" | "none" | { type: "fun
   return "auto";
 }
 
-function recordField(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
 
 function str(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-export interface EmittedEvent {
-  event: string;
-  data: Record<string, unknown>;
-}
 
 interface PendingToolCall {
   itemId: string;
@@ -198,6 +191,7 @@ export class ChatStreamToResponses {
   private outputIndex = 0;
   private messageAnnounced = false;
   private usage: Record<string, unknown> | undefined;
+  private finishReason: string | undefined;
   private readonly repairSchemas: ReadonlyMap<string, Record<string, unknown>>;
 
   constructor(private readonly responseId: string, toolSchemas?: ReadonlyMap<string, Record<string, unknown>>) {
@@ -214,11 +208,12 @@ export class ChatStreamToResponses {
 
   ingest(chunk: Record<string, unknown>): EmittedEvent[] {
     const events: EmittedEvent[] = [];
-    const usage = recordField(chunk.usage);
+    const usage = asRecord(chunk.usage);
     if (usage) this.usage = normalizedUsage(usage);
-    const choice = Array.isArray(chunk.choices) ? recordField(chunk.choices[0]) : undefined;
+    const choice = Array.isArray(chunk.choices) ? asRecord(chunk.choices[0]) : undefined;
     if (!choice) return events;
-    const delta = recordField(choice.delta) ?? {};
+    if (typeof choice.finish_reason === "string" && choice.finish_reason) this.finishReason = choice.finish_reason;
+    const delta = asRecord(choice.delta) ?? {};
 
     const reasoning = [delta.reasoning_content, delta.reasoning]
       .find((value): value is string => typeof value === "string" && value.length > 0);
@@ -250,7 +245,7 @@ export class ChatStreamToResponses {
 
     const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
     for (const rawToolCall of toolCalls) {
-      const call = recordField(rawToolCall);
+      const call = asRecord(rawToolCall);
       if (!call) continue;
       const index = typeof call.index === "number" ? call.index : this.toolCalls.size;
       const existing = this.toolCalls.get(index) ?? {
@@ -261,7 +256,7 @@ export class ChatStreamToResponses {
         announced: false,
         outputIndex: this.nextToolOutputIndex(),
       };
-      const fn = recordField(call.function);
+      const fn = asRecord(call.function);
       if (fn) {
         if (typeof fn.name === "string" && fn.name) existing.name += fn.name;
         if (typeof fn.arguments === "string") existing.args += fn.arguments;
@@ -292,25 +287,21 @@ export class ChatStreamToResponses {
     return events;
   }
 
-  finalize(finishReason: string | undefined): EmittedEvent[] {
+  finalize(finishReason?: string): EmittedEvent[] {
     const events: EmittedEvent[] = [];
     if (this.messageAnnounced) {
       events.push(this.messageDoneEvent());
       this.outputIndex += 1;
     }
-    const calls = [...this.toolCalls.values()].sort((a, b) => a.outputIndex - b.outputIndex);
-    for (const call of calls) {
-      let args = call.args.trim() || "{}";
-      const schema = this.repairSchemas.get(call.name);
-      args = coerceToolArguments(args, schema, call.name);
-      if (call.name === "apply_patch" && isCompletePatchEnvelope(JSON.parse(args).input)) {
-        args = JSON.stringify({ input: normalizeApplyPatchDelimiters(JSON.parse(args).input) });
-      }
-      try {
-        JSON.parse(args);
-      } catch {
+    const calls: Array<{ call: PendingToolCall; args: string }> = [];
+    for (const call of [...this.toolCalls.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
+      const args = this.finalArguments(call);
+      if (args === undefined) {
         return [{ event: "error", data: { type: "error", message: `Tool call ${call.name} ended with invalid arguments; not completing the item.` } }];
       }
+      calls.push({ call, args });
+    }
+    for (const { call, args } of calls) {
       events.push({
         event: "response.function_call_arguments.done",
         data: { type: "response.function_call_arguments.done", item_id: call.itemId, output_index: call.outputIndex, arguments: args },
@@ -320,37 +311,35 @@ export class ChatStreamToResponses {
 
     const output: Array<Record<string, unknown>> = [];
     if (this.messageAnnounced) output.push(this.messageItem());
-    for (const call of calls) {
-      let args = call.args.trim() || "{}";
-      const schema = this.repairSchemas.get(call.name);
-      args = coerceToolArguments(args, schema, call.name);
+    for (const { call, args } of calls) {
       output.push({ type: "function_call", id: call.itemId, call_id: call.callId, name: call.name, arguments: args });
     }
 
-    const truncation = truncatedStopReason(finishReason);
+    const response = { id: this.responseId, output, usage: this.usage ?? zeroUsage() };
+    const truncation = truncatedStopReason(finishReason ?? this.finishReason);
     if (truncation) {
       events.push({
         event: "response.incomplete",
-        data: {
-          type: "response.incomplete",
-          response: {
-            id: this.responseId,
-            output,
-            usage: this.usage ?? zeroUsage(),
-            incomplete_details: { reason: truncation === "max_output_tokens" ? "max_output_tokens" : "content_filter" },
-          },
-        },
+        data: { type: "response.incomplete", response: { ...response, incomplete_details: { reason: truncation } } },
       });
-      return events;
+    } else {
+      events.push({ event: "response.completed", data: { type: "response.completed", response } });
     }
-    events.push({
-      event: "response.completed",
-      data: {
-        type: "response.completed",
-        response: { id: this.responseId, output, usage: this.usage ?? zeroUsage() },
-      },
-    });
     return events;
+  }
+
+  private finalArguments(call: PendingToolCall): string | undefined {
+    const args = coerceToolArguments(call.args.trim() || "{}", this.repairSchemas.get(call.name), call.name);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(args);
+    } catch {
+      return undefined;
+    }
+    if (call.name !== "apply_patch") return args;
+    const input = asRecord(parsed)?.input;
+    if (typeof input !== "string" || !isCompletePatchEnvelope(input)) return args;
+    return JSON.stringify({ input: normalizeApplyPatchDelimiters(input) });
   }
 
   private nextToolOutputIndex(): number {
@@ -401,8 +390,8 @@ export class ChatStreamToResponses {
 }
 
 function normalizedUsage(usage: Record<string, unknown>): Record<string, unknown> {
-  const promptDetails = recordField(usage.prompt_tokens_details);
-  const completionDetails = recordField(usage.completion_tokens_details);
+  const promptDetails = asRecord(usage.prompt_tokens_details);
+  const completionDetails = asRecord(usage.completion_tokens_details);
   const inputTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
   const outputTokens = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
   return {
@@ -414,15 +403,7 @@ function normalizedUsage(usage: Record<string, unknown>): Record<string, unknown
   };
 }
 
-function zeroUsage(): Record<string, unknown> {
-  return {
-    input_tokens: 0,
-    output_tokens: 0,
-    total_tokens: 0,
-    input_tokens_details: { cached_tokens: 0 },
-    output_tokens_details: { reasoning_tokens: 0 },
-  };
-}
+
 
 export function formatSseEvent(event: EmittedEvent): Uint8Array {
   return new TextEncoder().encode(`event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`);

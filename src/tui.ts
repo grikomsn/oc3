@@ -9,11 +9,15 @@ import {
   createCliRenderer,
   RGBA,
 } from "@opentui/core";
+import { existsSync } from "node:fs";
 import type { OpenCodeAuth } from "./auth";
 import { availableModels, refreshModels } from "./console";
 import { writeCodexCatalog } from "./codex-catalog";
-import { launchChatGptDesktop, daemonRunning, readDaemonInfo, removeStaleDaemonFile, serveLogPath, stopDaemon } from "./daemon";
+import { launchChatGptDesktop, daemonRunning, readDaemonInfo, readServeLogTail, removeStaleDaemonFile, serveLogPath } from "./daemon";
+import { stopAll } from "./lifecycle";
 import { applyCodexOverrides, overridesApplied, readBackup, restoreCodexOverrides } from "./codex-config";
+import { maskKey } from "./secrets";
+export { maskKey };
 import { codexCatalogPath, loadKeys, loadState, saveKeys, saveState } from "./store";
 import { fetchGatewayUsage, gatewayKeyFor } from "./gateway";
 import { displayName, modeLabel, providerLabel, sortModelsByGroup, type Oc3Model } from "./models";
@@ -49,9 +53,9 @@ const VIEWS: Array<{ id: ViewId; label: string }> = [
 const MODES: Array<OpenCodeMode> = ["console", "go"];
 
 const HINTS: Record<ViewId, string> = {
-  models: "j/k move · g/G ends · Enter default · r refresh · / filter · 1-9/arrows/tab views · ? · q",
-  account: "j/k slot · Enter orgs · l/x sign · z key · c clear · u quota · 1-9/arrows/tab views · ? · q",
-  runtime: "s server · e overrides · d desktop · r log · 1-9/arrows/tab views · ? · q",
+  models: "j/k move · g/G ends · Enter default · r refresh · / filter · 1-3/arrows/tab views · ? · q",
+  account: "j/k slot · Enter orgs · l/x sign · z key · c clear · u quota · 1-3/arrows/tab views · ? · q",
+  runtime: "s server · e overrides · d desktop · r log · 1-3/arrows/tab views · ? · q",
 };
 
 // --- pure helpers (unit-tested) ---
@@ -83,13 +87,6 @@ export function fuzzyScore(haystack: string, needle: string): number | undefined
   if (hay === ned) score += 30;
   else if (hay.startsWith(ned)) score += 15;
   return score;
-}
-
-/** Mask an API key for display: `sk-1a…9f`, or "not set". */
-export function maskKey(value: string | undefined): string {
-  if (!value) return "not set";
-  if (value.length <= 8) return "••••••";
-  return `${value.slice(0, 4)}…${value.slice(-4)}`;
 }
 
 const FUZZY_FIELDS = (model: Oc3Model): string[] => [
@@ -171,6 +168,7 @@ function stringifyScalar(value: unknown): string {
 // --- shell ---
 
 export async function runTui(options: TuiOptions): Promise<() => void> {
+  removeStaleDaemonFile();
   const renderer = await (options.createRenderer ?? createCliRenderer)({ exitOnCtrlC: true });
   const auth = options.auth;
   const state = loadState<{ defaultModel?: string }>({});
@@ -360,6 +358,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
   let highlightedSlot: OpenCodeMode = "console";
   let orgs: Array<{ id: string; name: string }> = [];
   let loginActive = false;
+  let loginAbort: AbortController | undefined;
   let keyEdit: OpenCodeMode | undefined;
 
   function slotSummary(mode: OpenCodeMode): { name: string; description: string } {
@@ -459,8 +458,10 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
   }
 
   async function runLogin(mode: OpenCodeMode): Promise<void> {
+    loginAbort = new AbortController();
     try {
       await deviceSignIn(auth, mode, undefined, {
+        signal: loginAbort.signal,
         onDeviceCode: ({ userCode, verificationUrl }) => {
           loginLines[0]!.content = `Sign in to OpenCode ${modeLabel(mode)}: ${verificationUrl}`;
           loginLines[1]!.content = `User code: ${userCode}`;
@@ -476,6 +477,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
     } catch (error) {
       statusLine = `Sign-in failed: ${error instanceof Error ? error.message : String(error)}`;
     }
+    loginAbort = undefined;
     loginActive = false;
     loginPanel.visible = false;
     await loadModels(false);
@@ -568,7 +570,6 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
   content.add(runtimeView);
 
   function daemonState(): { running: boolean; port?: number; pid?: number } {
-    removeStaleDaemonFile();
     const info = readDaemonInfo();
     return info && daemonRunning(info) ? { running: true, port: info.port, pid: info.pid } : { running: false };
   }
@@ -586,12 +587,19 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
         : "proxy: stopped";
     proxyInfo.content = proxy;
     const applied = overridesApplied(overrides());
-    const backup = readBackup();
-    overridesInfo.content = `config: ${applied ? "overridden" : "original"} · backup: ${backup ? "present" : "none"}`;
+    overridesInfo.content = `config: ${applied ? "overridden" : "original"} · backup: ${backupState()}`;
     const records = handle ? [...handle.recentRequests()].reverse().slice(0, 8) : [];
     requestsText.content = records.length ? records.map(formatRequestRecord).join("\n") : handle ? "(no requests yet)" : "(in-process server not running — attach state shown above)";
     loadLogs();
     refreshStatus();
+  }
+
+  function backupState(): string {
+    try {
+      return readBackup() ? "present" : "none";
+    } catch {
+      return "unreadable";
+    }
   }
 
   async function toggleServer(): Promise<void> {
@@ -601,8 +609,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
       handle = undefined;
       statusLine = "In-process server stopped.";
     } else if (daemon.running) {
-      const stopped = stopDaemon();
-      const restored = restoreCodexOverrides();
+      const { stopped, restored } = await stopAll();
       statusLine = `${stopped ? "Daemon stopped." : "Daemon stop failed."}${restored.changed ? " Config restored." : ""}`;
     } else {
       try {
@@ -637,14 +644,8 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
   }
 
   function loadLogs(): void {
-    const path = serveLogPath();
-    Bun.file(path).text().then((content) => {
-      const lines = content.split("\n");
-      const tail = lines.slice(Math.max(0, lines.length - 120)).join("\n");
-      logsText.content = tail || "(log file is empty)";
-    }).catch(() => {
-      logsText.content = "(no serve log yet — s starts the in-process server)";
-    });
+    const tail = readServeLogTail(120);
+    logsText.content = tail || (existsSync(serveLogPath()) ? "(log file is empty)" : "(no serve log yet — s starts the in-process server)");
   }
 
   // --- view switching ---
@@ -683,7 +684,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
     accountBadge.content = [badge(consoleSession, "console:"), badge(goSession, "go:")].join(" · ");
     status.content = statusLine;
     footer.content = active === "account" && accountLayer === "orgs"
-      ? "j/k org · Enter switch · Esc slots · 1-9/arrows/tab views · ? · q"
+      ? "j/k org · Enter switch · Esc slots · 1-3/arrows/tab views · ? · q"
       : HINTS[active];
   }
 
@@ -706,7 +707,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
   content.add(helpBox);
   helpBox.add(new TextRenderable(renderer, { content: "oc3 — keybindings", fg: THEME_ACCENT }));
   for (const line of [
-    "1-9, arrows, or tab switch views (Models, Account, Runtime)",
+    "1-3, arrows, or tab switch views (Models, Account, Runtime)",
     "j / k               move selection (Shift for fast scroll)",
     "g / G               jump to top / bottom of a list",
     "Enter               activate the highlighted item",
@@ -731,6 +732,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
     for (const timer of timers) clearInterval(timer);
     timers.length = 0;
     for (const timer of focusTimers) clearTimeout(timer);
+    loginAbort?.abort();
     handle?.stop();
     try { renderer.destroy(); } catch { /* already gone */ }
   }
@@ -771,7 +773,7 @@ export async function runTui(options: TuiOptions): Promise<() => void> {
       setView(VIEWS[(index + step) % VIEWS.length]!.id);
       return;
     }
-    if (/^[1-9]$/.test(key.sequence ?? "")) {
+    if (/^[1-3]$/.test(key.sequence ?? "")) {
       const viewIndex = Number(key.sequence) - 1;
       if (viewIndex < VIEWS.length) setView(VIEWS[viewIndex]!.id);
       return;

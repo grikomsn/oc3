@@ -2,20 +2,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { startServer } from "../src/server";
 import { OpenCodeAuth } from "../src/auth";
-import { clearKeys, loadKeys, loadCatalogCache, saveKeys, saveCatalogSection, clearModeSession, saveModeSession } from "../src/store";
-import { displayName, findModel, modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, reasoningEffortsFromSource, type ProviderSource } from "../src/models";
+import { clearKeys, loadKeys, loadCatalogCache, loadSessions, saveKeys, saveCatalogSection, clearModeSession, saveModeSession } from "../src/store";
+import { displayName, findModel, isGatewayProvider, modelMode, modelsFromGatewayProvider, minimalGatewayModel, nativeChatGptModels, prettifyModelName, providerLabel, sortModelsByGroup, reasoningEffortsFromSource, type ProviderSource } from "../src/models";
 import { writeCodexCatalog } from "../src/codex-catalog";
-import { credentialForModel, credentialErrorHint } from "../src/credentials";
-import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayResponsesExtras } from "../src/gateway";
-import { envSaver, sessionFixture, writeLegacySession } from "./helpers";
+import { credentialForModel, credentialErrorHint, discoveryTokens } from "../src/credentials";
+import { availableModels, refreshModels } from "../src/console";
+import { fetchGatewayModels, gatewayChatTemplateArgs, gatewayKeyFor, gatewayResponsesExtras } from "../src/gateway";
+import { envSaver, portOf, sessionFixture, tempRoot, writeLegacySession } from "./helpers";
 import type { ConsoleSession } from "../src/protocol";
 import type { Oc3Model } from "../src/models";
 
-const HOME = "/tmp/oc3-gateway-test";
-const PROXY_PORT = 8894;
-const CONSOLE_PORT = 8901;
-const GO_PORT = 8902;
-const CATALOG_PORT = 8903;
+const HOME = tempRoot("oc3-gateway-test");
 
 const consoleRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
 const goRequests: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
@@ -24,7 +21,7 @@ const goModelAuths: Array<string | undefined> = [];
 
 const consoleUpstream = Bun.serve({
   hostname: "127.0.0.1",
-  port: CONSOLE_PORT,
+  port: 0,
   async fetch(request) {
     const url = new URL(request.url);
     const headers = Object.fromEntries(request.headers.entries());
@@ -48,10 +45,11 @@ const consoleUpstream = Bun.serve({
     return new Response("not found", { status: 404 });
   },
 });
+const CONSOLE_PORT = portOf(consoleUpstream);
 
 const goUpstream = Bun.serve({
   hostname: "127.0.0.1",
-  port: GO_PORT,
+  port: 0,
   async fetch(request) {
     const headers = Object.fromEntries(request.headers.entries());
     const pathname = new URL(request.url).pathname;
@@ -76,10 +74,11 @@ const goUpstream = Bun.serve({
     return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
   },
 });
+const GO_PORT = portOf(goUpstream);
 
 const catalogUpstream = Bun.serve({
   hostname: "127.0.0.1",
-  port: CATALOG_PORT,
+  port: 0,
   async fetch(request) {
     if (new URL(request.url).pathname === "/api.json") {
       return Response.json({
@@ -92,6 +91,7 @@ const catalogUpstream = Bun.serve({
     return new Response("not found", { status: 404 });
   },
 });
+const CATALOG_PORT = portOf(catalogUpstream);
 
 const consoleCatalogProvider: ProviderSource = {
   id: "opencode",
@@ -227,6 +227,15 @@ describe("gateway catalog parsing", () => {
     expect(routingEntry.thinking?.levels).toEqual(["low", "high"]);
   });
 
+  test("non-reasoning models expose only the thinking-off level", () => {
+    writeCodexCatalog([gatewayModel({ id: "opencode/plain", rawModelId: "plain", reasoning: false })]);
+    const codex = JSON.parse(readFileSync(`${process.env.OC3_HOME}/codex-models.json`, "utf8")) as {
+      models: Array<{ supported_reasoning_levels: Array<{ description: string; effort: string }>; default_reasoning_level: string }>;
+    };
+    expect(codex.models[0]!.supported_reasoning_levels).toEqual([{ description: "Turn thinking off", effort: "none" }]);
+    expect(codex.models[0]!.default_reasoning_level).toBe("none");
+  });
+
   test("minimalGatewayModel applies heuristic endpoint kinds", () => {
     const claude = minimalGatewayModel("opencode", "console", "claude-sonnet-5");
     expect(claude.endpoint).toBe("messages");
@@ -304,6 +313,44 @@ describe("gateway credential routing", () => {
     expect(credentialErrorHint(consoleModel)).toBe("Not signed in. Run: oc3 login");
     expect(credentialErrorHint(gatewayModel({ providerId: "opencode-go" }))).toContain("oc3 keys --set");
   });
+
+  test("OPENAI_API_KEY authorizes the native OpenAI bridge when set", async () => {
+    setEnv("OPENAI_API_KEY", "sk-test-openai");
+    const native = gatewayModel({ providerId: "openai", id: "openai/gpt-5.6-sol", rawModelId: "gpt-5.6-sol" });
+    expect(await tokenFor(native)).toBe("sk-test-openai");
+    expect(availableModels().map((model) => model.id)).toContain("openai/gpt-5.6-sol");
+    setEnv("OPENAI_API_KEY", undefined);
+    expect(availableModels().map((model) => model.id)).not.toContain("openai/gpt-5.6-sol");
+  });
+
+  test("gatewayKeyFor only resolves keys for gateway providers", () => {
+    const keys = { console: "console-key", go: "go-key" };
+    expect(gatewayKeyFor("opencode", keys, "env-key")).toBe("console-key");
+    expect(gatewayKeyFor("opencode-go", keys, "env-key")).toBe("go-key");
+    expect(gatewayKeyFor("opencode-go", {}, "env-key")).toBe("env-key");
+    expect(gatewayKeyFor("openai", keys, "env-key")).toBe("");
+  });
+
+  test("isGatewayProvider and modelMode follow the gateway provider ids", () => {
+    expect(isGatewayProvider("opencode")).toBe(true);
+    expect(isGatewayProvider("opencode-go")).toBe(true);
+    expect(isGatewayProvider("openai")).toBe(false);
+    expect(isGatewayProvider("console-org")).toBe(false);
+    expect(modelMode(gatewayModel({ providerId: "opencode-go" }))).toBe("go");
+    expect(modelMode(gatewayModel({}))).toBe("console");
+  });
+
+  test("the Console session token only reaches same-origin Console catalog models", async () => {
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    writeSession("session-token", `http://127.0.0.1:${CONSOLE_PORT}`);
+    const orgModel = (baseUrl: string): Oc3Model => gatewayModel({ providerId: "console-org", id: "console-org/model", rawModelId: "model", source: "console", baseUrl });
+    expect(await tokenFor(orgModel(`http://127.0.0.1:${CONSOLE_PORT}/v1`))).toBe("session-token");
+    expect(await tokenFor(orgModel("https://attacker.example/v1"))).toBeUndefined();
+    expect(await tokenFor(orgModel(`http://127.0.0.1:${GO_PORT}/v1`))).toBeUndefined();
+    expect(await tokenFor(gatewayModel({ providerId: "console-org", source: "gateway", baseUrl: `http://127.0.0.1:${CONSOLE_PORT}/v1` }))).toBeUndefined();
+    resetSessions();
+  });
 });
 
 describe("dual auth precedence", () => {
@@ -318,6 +365,18 @@ describe("dual auth precedence", () => {
     rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
     rmSync(`${process.env.OC3_HOME}/session.json`);
     clearKeys();
+  });
+
+  test("the go service key beats a go slot session", async () => {
+    resetSessions();
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    saveKeys({ go: "go-key-priority" });
+    saveModeSession("go", goSlotSession("go-slot-token"));
+    expect(await tokenFor(goModel())).toBe("go-key-priority");
+    clearKeys();
+    expect(await tokenFor(goModel())).toBe("go-slot-token");
+    resetSessions();
   });
 
   test("the shared Console session authorizes gateway models without a key", async () => {
@@ -365,6 +424,25 @@ function writeSession(token: string, server = "https://opencode.ai/console"): vo
 
 async function tokenFor(model: Oc3Model): Promise<string | undefined> {
   return (await credentialForModel(model, auth))?.token;
+}
+
+function resetSessions(): void {
+  rmSync(`${process.env.OC3_HOME}/sessions.json`, { force: true });
+  rmSync(`${process.env.OC3_HOME}/session.json`, { force: true });
+}
+
+function expiredSession(session: ConsoleSession): ConsoleSession {
+  return { ...session, expiresAt: Date.now() - 1000 };
+}
+
+/** Fake auth fetcher: every upstream call gets the same response; calls are recorded. */
+function refreshFetcher(respond: () => Response): { fetcher: typeof fetch; calls: string[] } {
+  const calls: string[] = [];
+  const fetcher = (async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return respond();
+  }) as typeof fetch;
+  return { fetcher, calls };
 }
 
 describe("keys store", () => {
@@ -458,7 +536,7 @@ describe("gateway catalog fetch", () => {
     saveCatalogSection("console", []);
     const result = await refreshGatewayCatalogs({ skipConsole: true });
     expect(result.console).toEqual([]);
-    expect(result.errors).not.toContain(expect.stringContaining("Console catalog unreachable"));
+    expect(result.errors.some((message) => message.includes("Console catalog unreachable"))).toBe(false);
     expect(loadCatalogCache().console).toEqual([]);
     expect((loadCatalogCache().go as Oc3Model[]).map((model) => model.rawModelId)).toEqual(["minimax-m3", "paid-go"]);
     await refreshGatewayCatalogs();
@@ -575,11 +653,65 @@ describe("refresh error surfacing", () => {
   });
 });
 
+describe("expired slot sessions", () => {
+  test("a failed refresh rejects getCredential with the upstream status", async () => {
+    resetSessions();
+    saveModeSession("console", expiredSession(sessionFixture({ token: "console-expired" })));
+    const { fetcher } = refreshFetcher(() => new Response("denied", { status: 401 }));
+    await expect(new OpenCodeAuth(fetcher).getCredential("console")).rejects.toThrow("token refresh failed (401)");
+    resetSessions();
+  });
+
+  test("concurrent credential reads share one token refresh", async () => {
+    resetSessions();
+    saveModeSession("console", expiredSession(sessionFixture({ token: "console-expired", refreshToken: "console-refresh" })));
+    const { fetcher, calls } = refreshFetcher(() => Response.json({ access_token: "console-fresh", refresh_token: "console-refresh-2", expires_in: 3600 }));
+    const refreshing = new OpenCodeAuth(fetcher);
+    const credentials = await Promise.all([refreshing.getCredential("console"), refreshing.getCredential("console"), refreshing.getCredential("console")]);
+    expect(credentials.map((credential) => credential.token)).toEqual(["console-fresh", "console-fresh", "console-fresh"]);
+    expect(calls).toHaveLength(1);
+    resetSessions();
+  });
+
+  test("discovery refreshes an expired go slot before sending its token", async () => {
+    resetSessions();
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    saveModeSession("go", expiredSession(goSlotSession("go-expired")));
+    const { fetcher, calls } = refreshFetcher(() => Response.json({ access_token: "go-fresh", refresh_token: "go-fresh-refresh", expires_in: 3600 }));
+    const tokens = await discoveryTokens(new OpenCodeAuth(fetcher));
+    expect(tokens).toEqual({ goToken: "go-fresh", errors: [] });
+    expect(calls).toEqual(["https://opencode.ai/console/auth/device/token"]);
+    expect(loadSessions().go?.accessToken).toBe("go-fresh");
+    resetSessions();
+  });
+
+  test("a failed console refresh is reported and go discovery still runs", async () => {
+    resetSessions();
+    clearKeys();
+    setEnv("OPENCODE_API_KEY", undefined);
+    saveModeSession("console", expiredSession(sessionFixture({ token: "console-expired" })));
+    const { fetcher, calls } = refreshFetcher(() => new Response("denied", { status: 401 }));
+    const failing = new OpenCodeAuth(fetcher);
+    const tokens = await discoveryTokens(failing);
+    expect(tokens.consoleToken).toBeUndefined();
+    expect(tokens.goToken).toBeUndefined();
+    expect(tokens.errors).toEqual(["OpenCode console token refresh failed (401)"]);
+    expect(calls).toHaveLength(1);
+    goModelAuths.length = 0;
+    const result = await refreshModels(failing);
+    expect(result.errors).toEqual(["OpenCode console token refresh failed (401)"]);
+    expect(goModelAuths).toHaveLength(1);
+    expect(result.models.some((model) => model.providerId === "opencode-go")).toBe(true);
+    resetSessions();
+  });
+});
+
 describe("console org headers", () => {
   test("sends both x-org-id and x-opencode-org-id on console-routed requests", async () => {
     saveCatalogSection("console", [gatewayModel({ source: "console", providerId: "console-org", id: "console-org/gpt-model", baseUrl: `http://127.0.0.1:${GO_PORT}/v1` })]);
-    writeSession("session-token");
-    const handle = await startServer({ port: PROXY_PORT + 4, auth });
+    writeSession("session-token", `http://127.0.0.1:${GO_PORT}`);
+    const handle = await startServer({ port: 0, auth });
     const response = await postResponses(handle.port, {
       model: "console-org/gpt-model",
       stream: true,
@@ -613,7 +745,7 @@ describe("console org headers", () => {
     }]);
     writeSession("console-slot-token");
     saveModeSession("go", goSlotSession("go-slot-token"));
-    const handle = await startServer({ port: PROXY_PORT + 5, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await postResponses(handle.port, {
       model: "opencode-go/fast",
       stream: true,
@@ -672,7 +804,7 @@ describe("oc3 proxy server with gateway models", () => {
 
   test("proxies Responses requests to Console with the service key and parity extras", async () => {
     consoleRequests.length = 0;
-    const handle = await startServer({ port: PROXY_PORT, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await postResponses(handle.port, {
       model: "opencode/gpt-model",
       stream: true,
@@ -699,7 +831,7 @@ describe("oc3 proxy server with gateway models", () => {
 
   test("bridges Go chat-completions models and tolerates the trailing cost chunk", async () => {
     goRequests.length = 0;
-    const handle = await startServer({ port: PROXY_PORT + 1, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await postResponses(handle.port, {
       model: "opencode-go/fast",
       stream: true,
@@ -718,7 +850,7 @@ describe("oc3 proxy server with gateway models", () => {
 
   test("sends gateway chat_template_args to thinking-mode chat models", async () => {
     goRequests.length = 0;
-    const handle = await startServer({ port: PROXY_PORT + 3, auth });
+    const handle = await startServer({ port: 0, auth });
     const response = await postResponses(handle.port, {
       model: "opencode-go/kimi-k2-thinking",
       stream: true,
@@ -735,7 +867,7 @@ describe("oc3 proxy server with gateway models", () => {
 
   test("messages models on the gateway use the go service key via x-api-key", async () => {
     goRequests.length = 0;
-    const handle = await startServer({ port: PROXY_PORT + 2, auth });
+    const handle = await startServer({ port: 0, auth });
     saveCatalogSection("go", [
       {
         id: "opencode-go/minimax-m3",

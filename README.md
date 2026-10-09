@@ -110,7 +110,7 @@ Codex ChatGPT backend with your own account session — disable them with
 
 ```shell
 bun install
-npm run check   # typecheck + tests
+npm run check   # typecheck + lint + tests
 npm run changeset   # user-visible changes need a changeset
 ```
 

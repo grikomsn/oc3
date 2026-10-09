@@ -1,21 +1,20 @@
 import type { Oc3Model } from "./models";
-import { newId } from "./protocol";
 import { responsesRequestToChat } from "./translate";
-import { truncatedStopReason } from "./stop-reason";
+import {
+  asRecord,
+  chatText,
+  numberOr,
+  parseDataUrl,
+  parseToolArguments,
+  PendingToolCall,
+  reasoningEffort,
+  replayByCallId,
+  ResponsesStream,
+  usageRecord,
+  type EmittedEvent,
+} from "./bridge-common";
 
-export interface EmittedEvent {
-  event: string;
-  data: Record<string, unknown>;
-}
-
-interface PendingToolCall {
-  itemId: string;
-  callId: string;
-  name: string;
-  args: string;
-  announced: boolean;
-  outputIndex: number;
-}
+export type { EmittedEvent } from "./bridge-common";
 
 /** Convert a Responses API request body to an Anthropic Messages request body. */
 export function anthropicRequestFromResponses(
@@ -23,6 +22,7 @@ export function anthropicRequestFromResponses(
   model: Oc3Model,
 ): Record<string, unknown> {
   const chat = responsesRequestToChat(body, model);
+  const replays = replayByCallId(body.input);
   const messages: Array<Record<string, unknown>> = [];
   const system: string[] = [];
 
@@ -68,6 +68,8 @@ export function anthropicRequestFromResponses(
         input: parseToolArguments(call.function.arguments),
       });
     }
+    const replay = message.tool_calls?.length ? replays.get(message.tool_calls[0]!.id) : undefined;
+    if (replay?.provider === "anthropic" && replay.blocks) content.unshift(...replay.blocks);
 
     messages.push({
       role: message.role,
@@ -83,61 +85,60 @@ export function anthropicRequestFromResponses(
     stream: true,
   };
   if (system.length) request.system = system.join("\n\n");
+  const finalTurn = finalAssistantContent(messages);
+  const finalTurnCallsTools = finalTurn.some((block) => asRecord(block)?.type === "tool_use");
+  const finalTurnSigned = finalTurn.some(isThinkingBlock);
+  const thinking = anthropicThinkingPayload(model, reasoningEffort(body.reasoning), maxTokens, finalTurnCallsTools && !finalTurnSigned);
+  if (!thinking) stripThinkingBlocks(messages);
   if (chat.tools?.length) {
     request.tools = chat.tools.map((tool) => ({
       name: tool.function.name,
       description: tool.function.description,
       input_schema: tool.function.parameters,
     }));
-    request.tool_choice = chat.tool_choice === "required" ? { type: "any" } : { type: "auto" };
+    request.tool_choice = anthropicToolChoice(chat.tool_choice, thinking, model.rawModelId);
   }
-
-  const effort = reasoningEffort(body.reasoning);
-  const thinking = anthropicThinkingPayload(model, effort, maxTokens);
   if (thinking) request.thinking = thinking;
   return request;
 }
 
+type OpenBlock =
+  | { kind: "thinking"; thinking: string; signature: string }
+  | { kind: "redacted"; data: string }
+  | { kind: "tool"; call: PendingToolCall };
+
 /**
  * Ingests one parsed Anthropic Messages SSE event and emits Responses events.
- * Unlike ChatStreamToResponses, the message item is announced on the first
- * visible text delta, because a thinking-only stream has no assistant text item.
+ * Thinking blocks become reasoning items whose replay payload carries the
+ * signed block, so the next turn can send it back.
  */
 export class AnthropicStreamToResponses {
-  private readonly itemId: string;
-  private readonly tools = new Map<string, PendingToolCall>();
-  private text = "";
-  private outputIndex = 0;
-  private messageAnnounced = false;
+  private readonly stream: ResponsesStream;
+  private readonly open = new Map<string, OpenBlock>();
   private stopReason: string | undefined;
-  private usage: Record<string, unknown> | undefined;
+  private rawUsage: Record<string, unknown> = {};
 
-  constructor(private readonly responseId: string) {
-    this.itemId = newId("msg");
+  constructor(responseId: string) {
+    this.stream = new ResponsesStream(responseId);
   }
 
   created(): EmittedEvent {
-    return {
-      event: "response.created",
-      data: { type: "response.created", response: { id: this.responseId } },
-    };
+    return this.stream.created();
   }
 
   ingest(event: Record<string, unknown>): EmittedEvent[] {
     const type = typeof event.type === "string" ? event.type : "";
     if (type === "message_start") {
-      const message = asRecord(event.message);
-      const usage = asRecord(message?.usage);
-      if (usage) this.usage = normalizedUsage(usage);
+      this.recordUsage(asRecord(asRecord(event.message)?.usage));
       return [];
     }
     if (type === "content_block_start") return this.contentBlockStart(event);
     if (type === "content_block_delta") return this.contentBlockDelta(event);
+    if (type === "content_block_stop") return this.contentBlockStop(event);
     if (type === "message_delta") {
       const delta = asRecord(event.delta);
       if (delta && typeof delta.stop_reason === "string") this.stopReason = delta.stop_reason;
-      const usage = asRecord(event.usage);
-      if (usage) this.usage = normalizedUsage(usage, this.usage);
+      this.recordUsage(asRecord(event.usage));
       return [];
     }
     if (type === "error") {
@@ -156,297 +157,176 @@ export class AnthropicStreamToResponses {
   }
 
   finalize(stopReason: string | undefined): EmittedEvent[] {
-    const events: EmittedEvent[] = [];
     const reason = stopReason ?? this.stopReason ?? "end_turn";
-    if (this.messageAnnounced) {
-      events.push(this.messageDoneEvent());
-      this.outputIndex += 1;
-    }
+    if (Object.keys(this.rawUsage).length) this.stream.setUsage(anthropicUsage(this.rawUsage));
+    return this.stream.finalize(reason);
+  }
 
-    const calls = [...this.tools.values()].sort((a, b) => a.outputIndex - b.outputIndex);
-    for (const call of calls) {
-      const args = call.args.trim() || "{}";
-      JSON.parse(args);
-      events.push({
-        event: "response.function_call_arguments.done",
-        data: {
-          type: "response.function_call_arguments.done",
-          item_id: call.itemId,
-          output_index: call.outputIndex,
-          arguments: args,
-        },
-      });
-      events.push({
-        event: "response.output_item.done",
-        data: {
-          type: "response.output_item.done",
-          output_index: call.outputIndex,
-          item: {
-            type: "function_call",
-            id: call.itemId,
-            call_id: call.callId,
-            name: call.name,
-            arguments: args,
-          },
-        },
-      });
+  private recordUsage(usage: Record<string, unknown> | undefined): void {
+    if (!usage) return;
+    for (const [key, value] of Object.entries(usage)) {
+      if (typeof value === "number" && Number.isFinite(value)) this.rawUsage[key] = value;
     }
-
-    const output: Array<Record<string, unknown>> = [];
-    if (this.messageAnnounced) {
-      output.push({
-        type: "message",
-        id: this.itemId,
-        role: "assistant",
-        content: [{ type: "output_text", text: this.text, annotations: [] }],
-      });
-    }
-    for (const call of calls) {
-      output.push({
-        type: "function_call",
-        id: call.itemId,
-        call_id: call.callId,
-        name: call.name,
-        arguments: call.args.trim() || "{}",
-      });
-    }
-
-    const truncation = truncatedStopReason(reason);
-    if (truncation) {
-      events.push({
-        event: "response.incomplete",
-        data: {
-          type: "response.incomplete",
-          response: {
-            id: this.responseId,
-            output,
-            usage: this.usage ?? zeroUsage(),
-            incomplete_details: {
-              reason: truncation === "max_output_tokens" ? "max_output_tokens" : "content_filter",
-            },
-          },
-        },
-      });
-      return events;
-    }
-    events.push({
-      event: "response.completed",
-      data: {
-        type: "response.completed",
-        response: { id: this.responseId, output, usage: this.usage ?? zeroUsage() },
-      },
-    });
-    return events;
   }
 
   private contentBlockStart(event: Record<string, unknown>): EmittedEvent[] {
-    const block = asRecord(event.content_block);
-    if (block?.type !== "tool_use") return [];
     const index = indexKey(event.index);
+    const block = asRecord(event.content_block);
+    if (block?.type === "thinking") {
+      this.open.set(index, { kind: "thinking", thinking: typeof block.thinking === "string" ? block.thinking : "", signature: "" });
+      return this.stream.openReasoning();
+    }
+    if (block?.type === "redacted_thinking") {
+      this.open.set(index, { kind: "redacted", data: typeof block.data === "string" ? block.data : "" });
+      return this.stream.openReasoning();
+    }
+    if (block?.type !== "tool_use") return [];
+    const { call, events } = this.stream.startCall(
+      typeof block.id === "string" && block.id ? block.id : `call_${index}`,
+      typeof block.name === "string" ? block.name : "",
+    );
     const input = asRecord(block.input);
-    const existing: PendingToolCall = {
-      itemId: newId("fc"),
-      callId: typeof block.id === "string" && block.id ? block.id : newId("call"),
-      name: typeof block.name === "string" ? block.name : "",
-      args: input && Object.keys(input).length ? JSON.stringify(input) : "",
-      announced: false,
-      outputIndex: this.nextToolOutputIndex(),
-    };
-    this.tools.set(index, existing);
-    return this.announceTool(existing);
+    if (input && Object.keys(input).length) call.args = JSON.stringify(input);
+    this.open.set(index, { kind: "tool", call });
+    return events;
   }
 
   private contentBlockDelta(event: Record<string, unknown>): EmittedEvent[] {
+    const index = indexKey(event.index);
     const delta = asRecord(event.delta);
     if (!delta) return [];
     if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
-      const events: EmittedEvent[] = [];
-      if (!this.messageAnnounced) {
-        this.messageAnnounced = true;
-        events.push(this.messageAddedEvent());
-      }
-      this.text += delta.text;
-      events.push({
-        event: "response.output_text.delta",
-        data: {
-          type: "response.output_text.delta",
-          item_id: this.itemId,
-          output_index: this.outputIndex,
-          content_index: 0,
-          delta: delta.text,
-        },
-      });
-      return events;
+      return this.stream.appendText(delta.text);
     }
     if (delta.type === "thinking_delta" && typeof delta.thinking === "string" && delta.thinking) {
-      return [{
-        event: "response.reasoning_summary_text.delta",
-        data: {
-          type: "response.reasoning_summary_text.delta",
-          item_id: "reasoning",
-          output_index: 0,
-          summary_index: 0,
-          delta: delta.thinking,
-        },
-      }];
+      this.thinkingBlock(index).thinking += delta.thinking;
+      return this.stream.reasoningDelta(delta.thinking);
+    }
+    if (delta.type === "signature_delta" && typeof delta.signature === "string") {
+      this.thinkingBlock(index).signature += delta.signature;
+      return [];
     }
     if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
-      const call = this.tools.get(indexKey(event.index));
-      if (!call) return [];
-      call.args += delta.partial_json;
-      const announced = this.announceTool(call);
-      announced.push({
-        event: "response.function_call_arguments.delta",
-        data: {
-          type: "response.function_call_arguments.delta",
-          item_id: call.itemId,
-          output_index: call.outputIndex,
-          delta: delta.partial_json,
-        },
-      });
-      return announced;
+      const block = this.open.get(index);
+      if (block?.kind !== "tool") return [];
+      return this.stream.appendCallArgs(block.call, delta.partial_json);
     }
     return [];
   }
 
-  private announceTool(call: PendingToolCall): EmittedEvent[] {
-    if (call.announced) return [];
-    call.announced = true;
-    return [{
-      event: "response.output_item.added",
-      data: {
-        type: "response.output_item.added",
-        output_index: call.outputIndex,
-        item: {
-          type: "function_call",
-          id: call.itemId,
-          call_id: call.callId,
-          name: call.name,
-          arguments: "",
-        },
-      },
-    }];
+  private contentBlockStop(event: Record<string, unknown>): EmittedEvent[] {
+    const index = indexKey(event.index);
+    const block = this.open.get(index);
+    this.open.delete(index);
+    if (block?.kind === "thinking") {
+      const replay = block.signature
+        ? { provider: "anthropic" as const, blocks: [{ type: "thinking", thinking: block.thinking, signature: block.signature }] }
+        : undefined;
+      return this.stream.closeReasoning(replay);
+    }
+    if (block?.kind === "redacted") {
+      return this.stream.closeReasoning({ provider: "anthropic", blocks: [{ type: "redacted_thinking", data: block.data }] });
+    }
+    return [];
   }
 
-  private messageAddedEvent(): EmittedEvent {
-    return {
-      event: "response.output_item.added",
-      data: {
-        type: "response.output_item.added",
-        output_index: this.outputIndex,
-        item: { type: "message", id: this.itemId, role: "assistant", content: [] },
-      },
-    };
-  }
-
-  private messageDoneEvent(): EmittedEvent {
-    return {
-      event: "response.output_item.done",
-      data: {
-        type: "response.output_item.done",
-        output_index: this.outputIndex,
-        item: {
-          type: "message",
-          id: this.itemId,
-          role: "assistant",
-          content: [{ type: "output_text", text: this.text, annotations: [] }],
-        },
-      },
-    };
-  }
-
-  private nextToolOutputIndex(): number {
-    return this.outputIndex + 1 + this.tools.size;
+  private thinkingBlock(index: string): Extract<OpenBlock, { kind: "thinking" }> {
+    const existing = this.open.get(index);
+    if (existing?.kind === "thinking") return existing;
+    const created: Extract<OpenBlock, { kind: "thinking" }> = { kind: "thinking", thinking: "", signature: "" };
+    this.open.set(index, created);
+    return created;
   }
 }
 
 /**
- * Effort values understood by Codex are limited to a subset of Anthropic's
- * thinking controls. Enable thinking only for high-or-greater requests.
+ * Manual `enabled` thinking needs 1024 <= budget_tokens < max_tokens, and Claude 4.7
+ * and later reject it outright, so those models use adaptive thinking. A manual
+ * request whose final assistant turn calls tools needs that turn to start with a
+ * signed thinking block; without one the request is sent without thinking.
+ * Thinking is only enabled for high-or-greater requests.
  */
-function anthropicThinkingPayload(model: Oc3Model, effort: string | undefined, maxTokens: number): Record<string, unknown> | undefined {
+function anthropicThinkingPayload(
+  model: Oc3Model,
+  effort: string | undefined,
+  maxTokens: number,
+  manualBlockedByToolTurn: boolean,
+): Record<string, unknown> | undefined {
   if (!model.reasoning) return undefined;
   if (effort !== "high" && effort !== "xhigh" && effort !== "max") return undefined;
-  // Anthropic requires budget_tokens >= 1024 and < max_tokens.
-  const budget = Math.min(16_384, Math.max(1_024, maxTokens - 1_024));
-  return { type: "enabled", budget_tokens: budget };
+  if (requiresAdaptiveThinking(model.rawModelId)) return { type: "adaptive" };
+  if (manualBlockedByToolTurn || maxTokens < 2_048) return undefined;
+  return { type: "enabled", budget_tokens: Math.min(16_384, maxTokens - 1_024) };
 }
 
-function normalizedUsage(usage: Record<string, unknown>, previous?: Record<string, unknown>): Record<string, unknown> {
-  const base = previous ?? {};
-  const input = numberOr(usage.input_tokens, numberOr(base.input_tokens, 0));
-  const output = numberOr(usage.output_tokens, numberOr(base.output_tokens, 0));
-  const cached = numberOr(usage.cache_read_input_tokens, numberOr(base.input_tokens_details ? (asRecord(base.input_tokens_details)?.cached_tokens as unknown) : 0, 0));
-  const reasoning = numberOr(usage.reasoning_tokens, numberOr(base.output_tokens_details ? (asRecord(base.output_tokens_details)?.reasoning_tokens as unknown) : 0, 0));
-  return {
-    input_tokens: input,
-    output_tokens: output,
-    total_tokens: numberOr(usage.total_tokens, input + output),
-    input_tokens_details: { cached_tokens: cached },
-    output_tokens_details: { reasoning_tokens: reasoning },
-  };
+/** Claude 4.7 and later (including 5.x) only accept adaptive thinking. */
+export function requiresAdaptiveThinking(rawModelId: string): boolean {
+  const match = /claude-(?:(?:opus|sonnet|haiku|fable|mythos)-)?(\d+)(?:[.-](\d+))?/i.exec(rawModelId);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = match[2] === undefined ? 0 : Number(match[2]);
+  return major > 4 || (major === 4 && minor >= 7);
 }
 
-function zeroUsage(): Record<string, unknown> {
-  return {
-    input_tokens: 0,
-    output_tokens: 0,
-    total_tokens: 0,
-    input_tokens_details: { cached_tokens: 0 },
-    output_tokens_details: { reasoning_tokens: 0 },
-  };
+/** Forced tool use is incompatible with thinking, so thinking turns fall back to auto. */
+/**
+ * Forced tool use (`any`) conflicts with manual thinking. Adaptive thinking allows
+ * it, except on the models that reject it.
+ */
+function anthropicToolChoice(choice: unknown, thinking: Record<string, unknown> | undefined, rawModelId: string): Record<string, unknown> {
+  if (choice === "none") return { type: "none" };
+  const forcedAllowed = thinking === undefined || (thinking.type === "adaptive" && !rejectsForcedToolUse(rawModelId));
+  if (choice === "required" && forcedAllowed) return { type: "any" };
+  return { type: "auto" };
 }
 
-function anthropicImage(value: unknown): Record<string, unknown> | undefined {
-  const url = typeof value === "string"
-    ? value
-    : typeof asRecord(value)?.url === "string"
-      ? asRecord(value)?.url as string
-      : undefined;
-  const match = /^data:(.+?);base64,(.+)$/.exec(url ?? "");
-  if (!match) return undefined;
-  return {
-    type: "image",
-    source: { type: "base64", media_type: match[1], data: match[2] },
-  };
+function rejectsForcedToolUse(rawModelId: string): boolean {
+  return /claude-(opus-5-5|sonnet-5-5|fable-5-1|mythos-5-1)/i.test(rawModelId.replace(/\./g, "-"));
 }
 
-function parseToolArguments(value: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(value || "{}");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : { value: parsed };
-  } catch {
-    return { value };
+function finalAssistantContent(messages: Array<Record<string, unknown>>): unknown[] {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant") return Array.isArray(message.content) ? message.content : [];
+  }
+  return [];
+}
+
+function isThinkingBlock(block: unknown): boolean {
+  const record = asRecord(block);
+  if (record?.type === "redacted_thinking") return true;
+  return record?.type === "thinking" && typeof record.signature === "string" && record.signature.length > 0;
+}
+
+function stripThinkingBlocks(messages: Array<Record<string, unknown>>): void {
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    message.content = message.content.filter((block) => {
+      const type = asRecord(block)?.type;
+      return type !== "thinking" && type !== "redacted_thinking";
+    });
   }
 }
 
-function reasoningEffort(value: unknown): string | undefined {
-  const record = asRecord(value);
-  return record && typeof record.effort === "string" ? record.effort : undefined;
+/** Anthropic reports cache reads and writes apart from input_tokens; fold them back in. */
+function anthropicUsage(raw: Record<string, unknown>): Record<string, unknown> {
+  const cached = numberOr(raw.cache_read_input_tokens, 0);
+  const created = numberOr(raw.cache_creation_input_tokens, 0);
+  const input = numberOr(raw.input_tokens, 0) + cached + created;
+  const output = numberOr(raw.output_tokens, 0);
+  return usageRecord(input, output, undefined, cached, 0);
 }
 
-function chatText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((part) => {
-    const record = asRecord(part);
-    return record && typeof record.text === "string" ? record.text : "";
-  }).join("\n");
+function anthropicImage(value: unknown): Record<string, unknown> | undefined {
+  const image = parseDataUrl(value);
+  if (!image) return undefined;
+  return {
+    type: "image",
+    source: { type: "base64", media_type: image.mediaType, data: image.data },
+  };
 }
 
 function indexKey(value: unknown): string {
   if (typeof value === "number" && Number.isInteger(value)) return String(value);
   return typeof value === "string" && value ? value : "0";
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function numberOr(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }

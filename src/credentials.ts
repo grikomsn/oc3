@@ -9,13 +9,15 @@
 // Keys take precedence over device sessions for gateway-routed models;
 // org-config models prefer the session that discovered them — a key never
 // silently overrides a known org. There is never a console→go key fallback.
+// Other providers get the Console session only for Console-catalog models on
+// the session's own origin.
 // OC3_TEST_TOKEN is the credential-dependent test bypass (temp OC3_HOME only).
 
+import { gatewayKeyFor, gatewayProviderId } from "./gateway";
 import { isGatewayProvider, modelMode, type Oc3Model } from "./models";
 import type { OpenCodeMode } from "./protocol";
 import type { OpenCodeAuth } from "./auth";
 import { loadKeys } from "./store";
-import { gatewayKeyFor } from "./gateway";
 
 export interface ModelCredential {
   token: string;
@@ -32,22 +34,31 @@ export async function credentialForModel(model: Oc3Model, auth: OpenCodeAuth): P
   if (testToken) return { token: testToken };
   if (!isGatewayProvider(model.providerId)) {
     const session = auth.getSession("console");
-    return session ? await auth.getCredential("console") : undefined;
+    if (model.source !== "console" || !session || originOf(model.baseUrl) !== originOf(session.server)) return undefined;
+    return await auth.getCredential("console");
   }
-  const mode = modelMode(model);
   if (model.source !== "console") {
     // A stored service-account key beats the device-flow session for
     // gateway-routed models. The mode's session authorizes gateway requests;
     // with no go sign-in, the console slot's shared session still applies.
-    const key = gatewayKeyFor(model.providerId, loadKeys());
-    if (key) return { token: key };
-    const slot = sessionSlotFor(auth, mode);
-    if (slot) return await auth.getCredential(slot);
-    return { token: "public" };
+    return (await resolveSlotToken(auth, modelMode(model))) ?? { token: "public" };
   }
   // Org-config models ride the console slot that discovered them.
   if (!auth.isSignedIn("console")) return undefined;
   return await auth.getCredential("console");
+}
+
+/**
+ * The credential a mode's gateway traffic uses: its service key, else its
+ * session (refreshed when near expiry; go falls back to the console slot's
+ * session). Undefined when the mode has no credential at all. Returns the org
+ * the session belongs to alongside the token.
+ */
+export async function resolveSlotToken(auth: OpenCodeAuth, mode: OpenCodeMode): Promise<ModelCredential | undefined> {
+  const key = gatewayKeyFor(gatewayProviderId(mode), loadKeys());
+  if (key) return { token: key };
+  const slot = sessionSlotFor(auth, mode);
+  return slot ? await auth.getCredential(slot) : undefined;
 }
 
 /** The slot whose session applies for a mode's gateway requests. */
@@ -56,18 +67,41 @@ function sessionSlotFor(auth: OpenCodeAuth, mode: OpenCodeMode): OpenCodeMode | 
   return mode === "go" && auth.isSignedIn("console") ? "console" : undefined;
 }
 
+export interface DiscoveryTokens {
+  consoleToken?: string;
+  goToken?: string;
+  errors: string[];
+}
+
 /**
- * The Bearer token used for PUBLIC catalog discovery per mode slot — the same
- * key > slot-session (with go→console compat) precedence as request routing,
- * kept in one place.
+ * The Bearer tokens for PUBLIC catalog discovery, one per mode slot, resolved
+ * by resolveSlotToken. The slots settle independently: a refresh failure is
+ * reported in `errors` and that slot discovers anonymously. Both start together
+ * so a shared console session refreshes once for both slots.
  */
-export async function discoveryTokens(auth: OpenCodeAuth): Promise<{ consoleToken?: string; goToken?: string }> {
-  const keys = loadKeys();
-  const consoleSession = auth.isSignedIn("console") ? (await auth.getCredential("console")).token : undefined;
+export async function discoveryTokens(auth: OpenCodeAuth): Promise<DiscoveryTokens> {
+  const [consoleSlot, goSlot] = await Promise.allSettled([
+    resolveSlotToken(auth, "console"),
+    resolveSlotToken(auth, "go"),
+  ]);
+  const errors = new Set<string>();
+  for (const slot of [consoleSlot, goSlot]) {
+    if (slot.status === "rejected") errors.add(slot.reason instanceof Error ? slot.reason.message : String(slot.reason));
+  }
   return {
-    consoleToken: gatewayKeyFor("opencode", keys) || consoleSession,
-    goToken: gatewayKeyFor("opencode-go", keys) || (auth.getSession("go")?.accessToken ?? consoleSession),
+    consoleToken: consoleSlot.status === "fulfilled" ? consoleSlot.value?.token : undefined,
+    goToken: goSlot.status === "fulfilled" ? goSlot.value?.token : undefined,
+    errors: [...errors],
   };
+}
+
+function originOf(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function credentialErrorHint(model: Oc3Model): string {

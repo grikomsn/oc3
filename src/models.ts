@@ -1,4 +1,4 @@
-import { nativeChatGptBase, nativeOpenAiBase, resolveEndpointKind, type EndpointKind, type OpenCodeMode } from "./protocol";
+import { nativeChatGptBase, nativeOpenAiBase, providerMode, resolveEndpointKind, type EndpointKind, type OpenCodeMode } from "./protocol";
 
 export interface ModelSource {
   id?: string;
@@ -229,16 +229,13 @@ export function prettifyModelName(rawId: string): string {
   }).join(" ");
 }
 
-/** The first-party OpenCode provider ids oc3 proxies. */
-export const OPENCODE_PROVIDER_IDS = ["opencode", "opencode-go"] as const;
-
 export function isGatewayProvider(providerId: string): boolean {
-  return providerId === "opencode" || providerId === "opencode-go";
+  return providerMode(providerId) !== undefined;
 }
 
 /** Which mode slot (console / go) a model routes through; provider id decides. */
 export function modelMode(model: Oc3Model): OpenCodeMode {
-  return model.providerId === "opencode-go" ? "go" : "console";
+  return providerMode(model.providerId) ?? "console";
 }
 
 /** Human label for a mode slot. */

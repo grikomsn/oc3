@@ -7,7 +7,6 @@ export default tseslint.config(
     files: ["src/**/*.ts", "test/**/*.ts"],
     rules: {
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
-      "no-console": "off",
     },
   },
 );
