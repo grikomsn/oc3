@@ -84,12 +84,10 @@ jobs:
           mkdir -p dist npm-dist
           # bun skips foreign-platform optional deps; the compile embeds each
           # target's opentui native, so force-install all four before building.
-          OTUI_VERSION="$(node -p "require('./package.json').devDependencies['@opentui/core-darwin-arm64']")"
-          npm install --no-save --force \
-            "@opentui/core-darwin-arm64@${OTUI_VERSION}" \
-            "@opentui/core-darwin-x64@${OTUI_VERSION}" \
-            "@opentui/core-linux-x64@${OTUI_VERSION}" \
-            "@opentui/core-linux-arm64@${OTUI_VERSION}"
+          # --no-save keeps bun.lock untouched. npm is avoided here on purpose:
+          # it cannot walk bun's isolated node_modules store, whose published
+          # packages carry workspace:* devDeps (EUNSUPPORTEDPROTOCOL).
+          bun install --no-save --os='*' --cpu='*'
           for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
             bun build ./src/cli.ts --compile --minify \
               --target="bun-${target}" \
