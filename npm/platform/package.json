@@ -3,6 +3,10 @@
   "version": "0.0.1",
   "description": "oc3 binary (TEMPLATE platform)",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/grikomsn/oc3.git"
+  },
   "os": [
     "TEMPLATE_OS"
   ],
